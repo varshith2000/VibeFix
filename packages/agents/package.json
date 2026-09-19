@@ -1,0 +1,26 @@
+{
+  "name": "@vibefix/agents",
+  "version": "0.1.0",
+  "description": "The 10 MVP agents: contracts, registry, runtime loops (text + typed decision), implementations",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vibefix/schemas": "workspace:*",
+    "@vibefix/core": "workspace:*",
+    "@vibefix/llm": "workspace:*",
+    "@vibefix/adapters": "workspace:*",
+    "zod": "^3.23.8"
+  }
+}

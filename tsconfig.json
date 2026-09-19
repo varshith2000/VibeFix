@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/schemas" },
+    { "path": "packages/llm" },
+    { "path": "packages/adapters" },
+    { "path": "packages/core" },
+    { "path": "packages/agents" },
+    { "path": "packages/server" },
+    { "path": "packages/fixture-repo" },
+    { "path": "packages/cli" }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@vibefix/adapters",
+  "version": "0.1.0",
+  "description": "Deterministic tools underneath the agents: fs facts, language detection, import graph, git, test/build probes, analyzer sidecar seam",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vibefix/schemas": "workspace:*"
+  }
+}

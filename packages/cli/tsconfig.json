@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../schemas" },
+    { "path": "../core" },
+    { "path": "../agents" },
+    { "path": "../adapters" },
+    { "path": "../server" }
+  ]
+}

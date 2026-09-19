@@ -1,0 +1,438 @@
+import { promises as fs } from "node:fs";
+import {
+  BacklogArtifactSchema,
+  RiskAssessmentsArtifactSchema,
+  type AgentDefinition,
+  type Budgets,
+  type ChangeLedgerEntry,
+  type ChangeProposal,
+  type RunState,
+} from "@vibefix/schemas";
+import { ledgerId } from "../util/ids.js";
+import { atomicWrite } from "../store/evidence-store.js";
+import type { EventLog } from "../store/event-log.js";
+import type { EvidenceStore } from "../store/evidence-store.js";
+import type { RunPaths } from "../store/paths.js";
+import type { BudgetMeter } from "../budget.js";
+import { reduce } from "./reducer.js";
+import type { AgentExecutorPort, AgentExecutionInput, AgentExecutionOutcome } from "./ports.js";
+import type { RunEvent } from "./state.js";
+import type { WorktreeManager, WorktreeHandle } from "../worktree/worktree-manager.js";
+import { ChangeFirewall } from "../worktree/firewall.js";
+
+const POOL_CONCURRENCY = 3;
+
+/**
+ * Executes reducer effects: runs agent pools, drives the execution loop
+ * (worktree -> engineer -> verifier -> verdict), persists state atomically,
+ * streams events. Resumable: an agent whose artifacts already exist is
+ * skipped by the executor layer (never re-billed).
+ */
+export class OrchestratorRuntime {
+  private state: RunState;
+  private readonly defs: AgentDefinition[];
+  private backlog: ChangeProposal[] | null = null;
+
+  constructor(
+    private readonly deps: {
+      paths: RunPaths;
+      store: EvidenceStore;
+      events: EventLog;
+      executor: AgentExecutorPort;
+      worktrees: WorktreeManager;
+      meter: BudgetMeter;
+      budgets: Budgets;
+    },
+    initialState: RunState,
+  ) {
+    this.state = initialState;
+    this.defs = deps.executor.definitions();
+  }
+
+  get runId(): string {
+    return this.state.runId;
+  }
+
+  /** Read access for the server layer (WS bridge, REST artifact reads). */
+  get events(): EventLog {
+    return this.deps.events;
+  }
+
+  get store(): EvidenceStore {
+    return this.deps.store;
+  }
+
+  snapshot(): RunState {
+    return structuredClone(this.state);
+  }
+
+  /** Feed a command into the reducer, persist, perform effects. */
+  async dispatch(event: RunEvent): Promise<void> {
+    if (this.state.status === "completed" || this.state.status === "aborted" || this.state.status === "failed") {
+      if (event.type !== "ABORT") return; // terminal: ignore stale work
+    }
+    const { state, effects } = reduce(
+      this.state,
+      event,
+      registryFrom(this.defs),
+      { maxRetriesPerChange: this.deps.budgets.maxRetriesPerChange, maxChangesPerRun: this.deps.budgets.maxChangesPerRun },
+    );
+    this.state = state;
+    this.state.budget.tokensSpent = this.deps.meter.tokens; // runtime-owned field
+    await this.persist();
+    await this.performEffects(effects);
+  }
+
+  private async performEffects(effects: ReturnType<typeof reduce>["effects"]): Promise<void> {
+    for (const effect of effects) {
+      switch (effect.effect) {
+        case "EmitEvent":
+          await this.deps.events.append(this.runId, effect.type, {
+            agentId: effect.agentId,
+            message: effect.message,
+            payload: effect.payload,
+          });
+          break;
+        case "SpawnPool":
+          await this.runPool(effect.pool, effect.agentIds);
+          break;
+        case "InvokeAgent":
+          await this.runSequentialAgent(effect.agentId);
+          break;
+        case "ExecuteProposal":
+          await this.executeProposal(effect.proposalId, effect.attempt);
+          break;
+        case "PauseForApproval":
+          break; // state persisted; server serves the checkpoint
+        case "CleanupWorktrees":
+          await this.deps.worktrees.cleanupAll().catch(() => undefined);
+          break;
+      }
+      if (this.deps.meter.exceeded) {
+        await this.dispatch({ type: "BUDGET_EXCEEDED" });
+        return;
+      }
+    }
+  }
+
+  private defById(agentId: string): AgentDefinition {
+    const def = this.defs.find((d) => d.agentId === agentId);
+    if (!def) throw new Error(`unknown agent '${agentId}'`);
+    return def;
+  }
+
+  private async runPool(pool: "recon" | "diagnosis", agentIds: string[]): Promise<void> {
+    const phase = pool === "recon" ? "recon" : "diagnosis";
+    const pending = agentIds.filter((id) => !isTerminal(this.state.agentStates[id]));
+    await this.withEvents(
+      pending.map(
+        (id) => () =>
+          this.runAgentGuarded(id, {
+            runState: this.snapshot(),
+          }),
+      ),
+    );
+    await this.dispatch({ type: "PHASE_COMPLETED", phase });
+  }
+
+  private async runSequentialAgent(agentId: string): Promise<void> {
+    const def = this.defById(agentId);
+    const input: AgentExecutionInput = { runState: this.snapshot() };
+    await this.runAgentGuarded(agentId, input);
+    const phase = def.phase;
+    if (phase === "riskAssessment" || phase === "synthesis" || phase === "harness" || phase === "report") {
+      await this.dispatch({ type: "PHASE_COMPLETED", phase });
+    }
+  }
+
+  private async runAgentGuarded(agentId: string, input: AgentExecutionInput): Promise<void> {
+    const def = this.defById(agentId);
+    await this.dispatch({ type: "AGENT_STARTED", agentId });
+    let outcome: AgentExecutionOutcome;
+    try {
+      outcome = await this.deps.executor.execute(def, input);
+    } catch (err) {
+      outcome = { outcome: "failed", artifactIds: [], error: String(err) };
+    }
+    await this.dispatch({
+      type: "AGENT_RESULT",
+      agentId,
+      outcome: outcome.outcome,
+      artifactIds: outcome.artifactIds,
+    });
+  }
+
+  /**
+   * The transformation loop, one proposal at a time:
+   * fresh worktree -> engineer (firewalled) -> commit -> verifier gates ->
+   * passed: cherry-pick to user branch | rejected: discard, budgeted retry.
+   */
+  private async executeProposal(proposalId: string, attempt: number): Promise<void> {
+    const proposal = await this.loadProposal(proposalId);
+    if (!proposal) {
+      await this.dispatch({ type: "FATAL", message: `proposal ${proposalId} not found in backlog` });
+      return;
+    }
+    const engineer = this.defs.find((d) => d.permission === "worktree-write");
+    const verifier = this.defs.find((d) => d.phase === "verification");
+    if (!engineer || !verifier) {
+      await this.dispatch({ type: "FATAL", message: "engineer or verifier agent missing from registry" });
+      return;
+    }
+
+    const handle = await this.deps.worktrees.create(proposalId, attempt);
+    const firewall = new ChangeFirewall(proposal, await this.forbiddenZones());
+    const baseInput: AgentExecutionInput = {
+      runState: this.snapshot(),
+      proposal,
+      attempt,
+      forbiddenZones: await this.forbiddenZones(),
+    };
+
+    await this.deps.events.append(this.runId, "agent.progress", {
+      agentId: engineer.agentId,
+      message: `attempt ${attempt}: implementing in worktree`,
+      proposalId,
+    });
+
+    await this.dispatch({ type: "AGENT_STARTED", agentId: engineer.agentId });
+    const engineerOutcome = await this.safeExecute(engineer, { ...baseInput, worktree: handle, firewall });
+    await this.dispatch({
+      type: "AGENT_RESULT",
+      agentId: engineer.agentId,
+      outcome: engineerOutcome.outcome === "passed" ? "passed" : engineerOutcome.outcome,
+      artifactIds: engineerOutcome.artifactIds,
+    });
+
+    // Firewall auto-reject or engineer refusal: no commit, straight to verdict.
+    if (engineerOutcome.outcome !== "passed") {
+      const diff = await this.deps.worktrees.diff(handle).catch(() => "");
+      await this.appendLedger({
+        proposalId, attempt, handle, diff,
+        verdict: "rejected",
+        verifierNotes: [engineerOutcome.reason ?? engineerOutcome.error ?? "engineer did not produce a passing attempt"],
+      });
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
+      await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason: engineerOutcome.reason });
+      return;
+    }
+
+    const diff = await this.deps.worktrees.diff(handle);
+    if (diff.trim().length === 0) {
+      // Empty diff = nothing to verify; treat as a no-op pass so the loop advances.
+      await this.appendLedger({
+        proposalId, attempt, handle, diff: "",
+        verdict: "passed",
+        verifierNotes: ["no changes produced (no-op)"],
+      });
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
+      await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "passed", reason: "no-op" });
+      return;
+    }
+
+    const commit = await this.deps.worktrees.commit(handle, `vibefix: ${proposal.title} (${proposalId})`);
+    if (!commit.ok || !commit.ref) {
+      await this.appendLedger({
+        proposalId, attempt, handle, diff,
+        verdict: "rejected",
+        verifierNotes: ["failed to commit the worktree"],
+      });
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
+      await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason: "commit failed" });
+      return;
+    }
+
+    // Fresh-context verification: diff + proposal + baseline only, never engineer reasoning.
+    await this.dispatch({ type: "AGENT_STARTED", agentId: verifier.agentId });
+    const verifierOutcome = await this.safeExecute(verifier, { ...baseInput, worktree: handle });
+    await this.dispatch({
+      type: "AGENT_RESULT",
+      agentId: verifier.agentId,
+      outcome: verifierOutcome.outcome === "passed" ? "passed" : "rejected",
+      artifactIds: verifierOutcome.artifactIds,
+    });
+
+    if (verifierOutcome.outcome === "passed") {
+      const landed = await this.deps.worktrees.landOnMainBranch(handle, commit.ref);
+      await this.appendLedger({
+        proposalId, attempt, handle, diff,
+        verdict: landed.ok ? "passed" : "rejected",
+        verifierNotes: landed.ok ? [] : ["cherry-pick conflict; user branch untouched"],
+        committedRef: landed.ok ? commit.ref : null,
+      });
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
+      await this.dispatch({
+        type: "GATE_VERDICT",
+        proposalId,
+        verdict: landed.ok ? "passed" : "rejected",
+        reason: landed.ok ? undefined : "landing conflict",
+      });
+      return;
+    }
+
+    await this.appendLedger({
+      proposalId, attempt, handle, diff,
+      verdict: "rejected",
+      verifierNotes: verifierOutcome.reason ? [verifierOutcome.reason] : [],
+    });
+    await this.deps.worktrees.discard(handle).catch(() => undefined);
+    await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason: verifierOutcome.reason });
+  }
+
+  private async safeExecute(def: AgentDefinition, input: AgentExecutionInput): Promise<AgentExecutionOutcome> {
+    try {
+      return await this.deps.executor.execute(def, input);
+    } catch (err) {
+      return { outcome: "failed", artifactIds: [], error: String(err) };
+    }
+  }
+
+  private async loadProposal(proposalId: string): Promise<ChangeProposal | null> {
+    if (!this.backlog) {
+      const artifact = await this.deps.store.latest("backlog");
+      if (!artifact) return null;
+      const parsed = BacklogArtifactSchema.parse(artifact.data);
+      this.backlog = parsed.proposals;
+    }
+    return this.backlog.find((p) => p.proposalId === proposalId) ?? null;
+  }
+
+  private forbiddenZonesCache: string[] | null = null;
+
+  /** Do-not-touch globs from the Risk Assessor artifact, cached for the run. */
+  private async forbiddenZones(): Promise<string[]> {
+    if (this.forbiddenZonesCache) return this.forbiddenZonesCache;
+    const artifact = await this.deps.store.latest("risk-assessments");
+    let zones: string[] = [];
+    if (artifact) {
+      try {
+        const parsed = RiskAssessmentsArtifactSchema.parse(artifact.data);
+        zones = parsed.forbiddenZones;
+      } catch {
+        zones = [];
+      }
+    }
+    this.forbiddenZonesCache = zones;
+    return zones;
+  }
+
+  private async appendLedger(input: {
+    proposalId: string;
+    attempt: number;
+    handle: WorktreeHandle;
+    diff: string;
+    verdict: ChangeLedgerEntry["verdict"];
+    verifierNotes: string[];
+    committedRef?: string | null;
+  }): Promise<void> {
+    const entry: ChangeLedgerEntry = {
+      ledgerId: ledgerId(),
+      proposalId: input.proposalId,
+      attempt: input.attempt,
+      worktreePath: input.handle.path,
+      baseCommit: input.handle.baseCommit,
+      diff: input.diff.length > 200_000 ? `${input.diff.slice(0, 200_000)}\n... (truncated)` : input.diff,
+      verdict: input.verdict,
+      verifierNotes: input.verifierNotes,
+      committedRef: input.committedRef ?? null,
+      ts: new Date().toISOString(),
+    };
+    // Ledger is append-list; read-modify-write under single-writer runtime.
+    let entries: ChangeLedgerEntry[] = [];
+    try {
+      const raw = JSON.parse(await fs.readFile(this.deps.paths.ledgerFile, "utf8"));
+      entries = (raw as { entries?: ChangeLedgerEntry[] }).entries ?? [];
+    } catch {
+      entries = [];
+    }
+    entries.push(entry);
+    await atomicWrite(this.deps.paths.ledgerFile, JSON.stringify({ entries }, null, 2));
+    await this.deps.events.append(this.runId, "ledger.updated", {
+      proposalId: input.proposalId,
+      message: input.verdict,
+    });
+  }
+
+  private async persist(): Promise<void> {
+    await atomicWrite(this.deps.paths.stateFile, JSON.stringify(this.state, null, 2));
+  }
+
+  /** Run tasks with a concurrency cap; all failures captured, never thrown. */
+  private async withEvents(tasks: Array<() => Promise<void>>): Promise<void> {
+    const queue = [...tasks];
+    const workers = Array.from({ length: Math.min(POOL_CONCURRENCY, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const task = queue.shift();
+        if (task) await task().catch(() => undefined);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  /**
+   * Resume after a process restart. Agents with existing artifacts are cheap
+   * no-ops (executor checks evidence presence); stale worktrees are discarded.
+   */
+  async resume(): Promise<void> {
+    const s = this.state;
+    if (s.status === "awaitingApproval" || s.status === "completed" || s.status === "aborted" || s.status === "failed") {
+      return; // waiting on user, or terminal
+    }
+    await this.deps.worktrees.cleanupAll().catch(() => undefined);
+    switch (s.phase) {
+      case "init":
+        return this.dispatch({ type: "START" });
+      case "recon":
+        return this.resumePool("recon");
+      case "diagnosis":
+        return this.resumePool("diagnosis");
+      case "riskAssessment":
+      case "synthesis":
+      case "harness":
+      case "report": {
+        const def = this.defs.find((d) => d.phase === s.phase);
+        if (!def) return this.dispatch({ type: "PHASE_COMPLETED", phase: s.phase });
+        if (isTerminal(s.agentStates[def.agentId])) {
+          return this.dispatch({ type: "PHASE_COMPLETED", phase: s.phase });
+        }
+        return this.runSequentialAgent(def.agentId);
+      }
+      case "execution": {
+        const proposalId = s.execution.queue[s.execution.currentIndex];
+        if (proposalId === undefined) {
+          return this.dispatch({ type: "PHASE_COMPLETED", phase: "execution" });
+        }
+        return this.executeProposal(proposalId, s.execution.attempt);
+      }
+      default:
+        return;
+    }
+  }
+
+  private async resumePool(pool: "recon" | "diagnosis"): Promise<void> {
+    const ids = this.defs.filter((d) => d.runsInPool === pool).map((d) => d.agentId);
+    const pending = ids.filter((id) => !isTerminal(this.state.agentStates[id]));
+    if (pending.length === 0) {
+      return this.dispatch({ type: "PHASE_COMPLETED", phase: pool });
+    }
+    await this.withEvents(
+      pending.map((id) => () => this.runAgentGuarded(id, { runState: this.snapshot() })),
+    );
+    await this.dispatch({ type: "PHASE_COMPLETED", phase: pool });
+  }
+}
+
+function isTerminal(status: RunState["agentStates"][string] | undefined): boolean {
+  return (
+    status === "passed" || status === "failed" || status === "rejected" || status === "skipped" || status === "deferred"
+  );
+}
+
+function registryFrom(defs: AgentDefinition[]) {
+  return {
+    agentIdsByPool: (pool: "recon" | "diagnosis") =>
+      defs.filter((d) => d.runsInPool === pool).map((d) => d.agentId),
+    agentIdByPhase: (phase: "riskAssessment" | "synthesis" | "harness" | "report") =>
+      defs.find((d) => d.phase === phase)?.agentId ?? null,
+  };
+}

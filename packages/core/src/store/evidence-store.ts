@@ -1,0 +1,142 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import {
+  decodeArtifact,
+  encodeArtifact,
+  type ArtifactKind,
+  type EvidenceArtifact,
+} from "@vibefix/schemas";
+import { artifactId } from "../util/ids.js";
+import type { RunPaths } from "./paths.js";
+
+/** Read side: what agents consume. */
+export interface EvidenceReader {
+  list(producer?: string, kind?: ArtifactKind): Promise<EvidenceArtifact[]>;
+  latest(kind: ArtifactKind): Promise<EvidenceArtifact | null>;
+  read(artifactId: string): Promise<EvidenceArtifact | null>;
+  /** Resumability: has this producer already written artifacts of these kinds? */
+  hasArtifacts(producer: string, kinds: readonly ArtifactKind[]): Promise<boolean>;
+}
+
+/** Write side: what agents produce. Artifacts are immutable once written. */
+export interface EvidenceWriter {
+  write(input: { kind: ArtifactKind; producer: string; runId: string; data: unknown }): Promise<EvidenceArtifact>;
+}
+
+export class EvidenceStore implements EvidenceReader, EvidenceWriter {
+  constructor(private readonly paths: RunPaths) {}
+
+  private producerDir(producer: string): string {
+    return path.join(this.paths.evidenceDir, producer);
+  }
+
+  async write(input: {
+    kind: ArtifactKind;
+    producer: string;
+    runId: string;
+    data: unknown;
+  }): Promise<EvidenceArtifact> {
+    const artifact = {
+      artifactId: artifactId(),
+      kind: input.kind,
+      producer: input.producer,
+      runId: input.runId,
+      createdAt: new Date().toISOString(),
+      data: input.data,
+      schemaVersion: 1 as const,
+    };
+    const { envelope, json } = encodeArtifact(artifact);
+    const dir = this.producerDir(input.producer);
+    await fs.mkdir(dir, { recursive: true });
+    // Immutability: refuse to silently overwrite a different content at same id (ids are unique anyway).
+    await atomicWrite(path.join(dir, `${envelope.artifactId}.json`), json);
+    // Convenience latest-by-kind pointers at run level.
+    const pointer = path.join(this.paths.evidenceDir, `latest-${envelope.kind}.json`);
+    await atomicWrite(pointer, json);
+    return envelope;
+  }
+
+  async list(producer?: string, kind?: ArtifactKind): Promise<EvidenceArtifact[]> {
+    const dirs: string[] = [];
+    if (producer) {
+      dirs.push(this.producerDir(producer));
+    } else {
+      try {
+        const entries = await fs.readdir(this.paths.evidenceDir, { withFileTypes: true });
+        for (const e of entries) if (e.isDirectory()) dirs.push(path.join(this.paths.evidenceDir, e.name));
+      } catch {
+        return [];
+      }
+    }
+    const out: EvidenceArtifact[] = [];
+    for (const dir of dirs) {
+      let files: string[];
+      try {
+        files = await fs.readdir(dir);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const raw = JSON.parse(await fs.readFile(path.join(dir, file), "utf8"));
+          const artifact = decodeArtifact(raw);
+          if (!kind || artifact.kind === kind) out.push(artifact);
+        } catch (err) {
+          // Corrupt artifact: surface as unknowns rather than crashing a run.
+          out.push({
+            artifactId: file.replace(/\.json$/, ""),
+            kind: "report",
+            producer: "orchestrator",
+            runId: "unknown",
+            createdAt: new Date(0).toISOString(),
+            data: { corrupt: true, error: String(err) },
+            schemaVersion: 1,
+          });
+        }
+      }
+    }
+    return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async latest(kind: ArtifactKind): Promise<EvidenceArtifact | null> {
+    try {
+      const raw = JSON.parse(
+        await fs.readFile(path.join(this.paths.evidenceDir, `latest-${kind}.json`), "utf8"),
+      );
+      return decodeArtifact(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  async read(artifactId: string): Promise<EvidenceArtifact | null> {
+    const dirs = await fs.readdir(this.paths.evidenceDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of dirs) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const raw = JSON.parse(
+          await fs.readFile(path.join(this.paths.evidenceDir, entry.name, `${artifactId}.json`), "utf8"),
+        );
+        return decodeArtifact(raw);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  async hasArtifacts(producer: string, kinds: readonly ArtifactKind[]): Promise<boolean> {
+    const artifacts = await this.list(producer);
+    const produced = new Set(artifacts.map((a) => a.kind));
+    return kinds.every((k) => produced.has(k));
+  }
+}
+
+/** Atomic file write: temp file + rename, so a crash never leaves half JSON. */
+export async function atomicWrite(filePath: string, content: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${Date.now().toString(36)}`;
+  await fs.writeFile(tmp, content, "utf8");
+  await fs.rename(tmp, filePath);
+}

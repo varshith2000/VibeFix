@@ -1,0 +1,32 @@
+{
+  "name": "@vibefix/server",
+  "version": "0.1.0",
+  "description": "Fastify REST + WebSocket server; the composition root wiring agents, core and adapters",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "vibefix-server": "./dist/main.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vibefix/schemas": "workspace:*",
+    "@vibefix/core": "workspace:*",
+    "@vibefix/agents": "workspace:*",
+    "@vibefix/adapters": "workspace:*",
+    "fastify": "^4.28.1",
+    "@fastify/websocket": "^10.0.1",
+    "@fastify/cors": "^8.5.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.16.2",
+    "@types/ws": "^8.5.10"
+  }
+}

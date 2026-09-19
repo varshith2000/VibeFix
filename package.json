@@ -1,0 +1,26 @@
+{
+  "name": "vibefix",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first multi-agent refactoring control plane for vibe-coded repositories",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:server": "pnpm --filter @vibefix/server dev",
+    "dev:ui": "pnpm --filter @vibefix/ui dev",
+    "dev": "pnpm --filter @vibefix/server dev",
+    "serve": "pnpm --filter @vibefix/cli start"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

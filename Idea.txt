@@ -1,0 +1,1641 @@
+# Refactoring Agent Framework — "VibeFix" Architecture Plan
+
+The core design insight: this is **not** one smart agent doing everything. It's a **pipeline of narrow, single-responsibility agents** where every change is proposed, reviewed by independent checker agents, and only applied if it passes all gates. The system's prime directive is **behavior preservation** — the refactoring must be "sound" (prove nothing broke), not just "clean."
+
+---
+
+## 1. Overall Architecture (3 Layers)
+
+```
+LAYER 1: UNDERSTAND      "What is this codebase, really?"
+LAYER 2: TRANSFORM       "Propose the smallest safe change set"
+LAYER 3: VERIFY & EXPLAIN "Prove it's safe, apply, teach the user"
+```
+
+Plus two cross-cutting components that run through everything:
+
+- **Orchestrator (Conductor Agent)** — framework-agnostic state machine. Holds a shared "Codebase Knowledge Graph" + "Change Ledger." Every other agent reads/writes through it. It decides what runs next, enforces budgets (max changes per run), and aborts on any gate failure.
+- **Shared Context Store** — a structured, framework-agnostic artifact (JSON/graph): dependency graph, entry points, dead code map, duplication clusters, test coverage map, and the ledger of every proposed change with its rationale and verification status.
+
+**Framework-agnostic means:** agents communicate only via structured artifacts (files/JSON/stdout contracts), never via framework-specific APIs. Each agent is a "brain + contract" — you can implement it with any LLM, and the orchestrator is a pure state machine (Python/TS), not a framework feature.
+
+---
+
+## 2. The Agent Roster (14 agents in 6 phases)
+
+### PHASE A — Recon & Understanding (read-only, parallel)
+
+**1. Cartographer Agent** — Maps the codebase: file tree, modules, entry points, languages, frameworks, build system, dependency graph (imports/requires), and boundaries. Output: the initial knowledge graph. *No opinions, just facts.*
+
+**2. Historian Agent** — Reads git history, commit messages, TODO/FIXME/HACK comments, and README to infer **intent**: what the product is supposed to do, what the "core" is, which areas are actively churned vs. frozen. This is your "don't deviate from the product's soul" guard — the Historian produces a **Product Intent Document** that every later agent must respect.
+
+**3. Test Surveyor Agent** — Determines what safety net exists: which test framework, coverage %, which paths are tested, and — critically — whether the project can even run/build. If tests are absent, this agent flags that Phase B must generate **characterization tests BEFORE any refactoring** (this is the key mechanism for "zero functionality change").
+
+### PHASE B — Diagnosis (the "mess detector pool", parallel, one concern per agent)
+
+Each produces a scored findings report; none of them change code.
+
+**4. Architecture Auditor** — Violations of high-level principles: layering (UI calling DB directly), circular dependencies, missing separation of concerns, god files/modules, tight coupling, no clear domain boundaries.
+
+**5. Code Smell Detector** — Function/class level: duplication (clone clusters), long functions, deep nesting, dead code, magic numbers, inconsistent naming, copy-pasted blocks across files.
+
+**6. Consistency Sentinel** — Style and convention drift: mixed patterns (three different ways to do HTTP calls), inconsistent error handling, mixed naming conventions, config scattered everywhere, duplicate utilities.
+
+**7. Risk Assessor** — The pessimist. For every finding from agents 4–6, it assigns a **risk score**: how likely is touching this to break behavior? Hotspots with no test coverage + high churn = "do not touch" zones. This enforces your "minimal, safe changes" requirement.
+
+**8. Synthesis Agent (Chief Diagnostician)** — Merges all findings into one prioritized **Remediation Backlog**: each item has problem, evidence, affected files, risk score, proposed fix *category*, and expected benefit. Ranked by (impact ÷ risk). This backlog is presented to the user **before** any change is made.
+
+### PHASE C — Safety Net Construction (before touching anything)
+
+**9. Harness Builder Agent** — Where tests are missing, generates **characterization/snapshot tests** that pin down *current* behavior (even if current behavior is ugly). These become the ground truth: after refactoring, if these tests fail, the refactor changed behavior and gets rejected. Also pins build output, API surface (endpoints, signatures), and public exports.
+
+### PHASE D — Transformation (sequential, one change at a time)
+
+**10. Refactoring Engineer** — The only agent allowed to write code. Takes exactly **one backlog item**, implements it following the principle catalog (SRP, DRY, single source of truth, dependency direction, etc.), and must follow strict rules:
+- Move, rename, extract, delete-dead-code — **never rewrite logic**
+- One atomic change per iteration, with a diff + a plain-language rationale
+- Explicitly forbidden zones from the Risk Assessor are untouchable
+
+### PHASE E — Verification Pool (the "checks pool" you asked for — independent reviewers, parallel)
+
+Each change must pass ALL of these before it's committed:
+
+**11. Behavior Equivalence Verifier** — Runs the characterization suite from Phase C, diffs API surfaces/build outputs, and (where feasible) uses semantic comparison. Any behavioral delta = automatic rejection back to agent 10.
+
+**12. Principle Compliance Reviewer** — A fresh-context agent that reviews the diff *only* for: does this actually follow the stated principle? Is it minimal (no drive-by edits)? Is naming/placement consistent with the codebase? Plays devil's advocate — it can veto with reasons.
+
+**13. Regression Sentinel** — Runs full build + existing tests + linters/static analysis; checks for new warnings, type errors, and verifies no forbidden file was touched. Also watches cumulative budget: "we promised ≤ N changes; stop if exceeded."
+
+### PHASE F — Explanation & Reporting (the teaching layer)
+
+**14. Docent Agent (Explainer)** — Produces the human-facing output:
+- **"State of your codebase" report**: what exists, what's missing (no tests! no error handling! everything in one file!), mapped to named software principles
+- **Per-change explainers**: what was moved/renamed/extracted, *why* (which principle), what was deliberately NOT touched and why
+- A before/after architecture diagram and a learning summary so the vibe coder levels up
+
+---
+
+## 3. The Orchestration Loop
+
+```
+1. Cartographer + Historian + Test Surveyor   (parallel, read-only)
+2. Diagnosis pool: 4→5→6 parallel, → 7 Risk Assessor → 8 Backlog
+3. USER CHECKPOINT: show backlog, user approves scope/risk level
+4. Harness Builder pins current behavior
+5. Loop over backlog items (one at a time):
+      Refactoring Engineer implements
+        → Verification pool (11+12+13 in parallel)
+        → all pass? commit to Change Ledger : reject with reasons → retry (max 2) or defer
+6. Re-run full suite → Docent produces final report + diagrams
+```
+
+Key loop properties: **single-writer** (only agent 10 writes), **fresh-context reviewers** (agents 11–13 never see the author's reasoning, so they can't be talked into approving a bad change), **retry budget** (a change that fails twice is deferred to the report, not forced), and **everything is resumable** because state lives in the shared store, not in conversation memory.
+
+---
+
+## 4. How Your Core Requirements Map
+
+| Requirement | Mechanism |
+|---|---|
+| Don't break functionality | Characterization tests *before* refactoring + Behavior Equivalence Verifier gate |
+| Don't deviate from product intent | Historian's Intent Document is a hard constraint for every downstream agent |
+| Minimal changes | Risk Assessor forbidden zones + change budget + "minimal diff" check in reviewer 12 |
+| Pool of checking agents, one concern each | Verification pool (11/12/13) + diagnosis pool (4/5/6) |
+| Explain what/why | Docent Agent reports + per-change ledger with rationale |
+| Framework/language agnostic | Agents contract via structured artifacts; orchestrator is a plain state machine |
+| "What's missing" per software practices | Synthesis backlog + Docent's gap report mapped to named principles |
+
+---
+
+## 5. Suggested Build Order (MVP → full)
+
+1. **MVP:** Orchestrator skeleton + Cartographer + Smell Detector + Refactoring Engineer + Behavior Verifier (run tests) + simple markdown report. This alone is useful.
+2. Add Harness Builder (characterization tests) — this is what makes it *safe* rather than confident.
+3. Add the diagnosis pool fully (Architecture Auditor, Consistency Sentinel, Risk Assessor) and the user checkpoint.
+4. Add Principle Compliance Reviewer + Regression Sentinel (full verification pool).
+5. Add Historian + Docent (intent preservation and teaching reports).
+6. Later: multi-language adapters, IDE/CLI/PR-mode interfaces, incremental runs (only re-analyze changed areas).
+
+
+----------------------------------------------------------------------------------------
+
+Chatgpt Version 
+
+Absolutely. What you are describing is less like a “code cleanup agent” and more like an autonomous software-forensics + architecture-repair system.
+The key design principle should be:
+	Understand first → establish behavioral truth → identify only justified problems → propose minimal changes → independently review → verify behavior → explain everything → never silently redesign the product.
+I would build this as a framework-agnostic orchestration engine with specialized agents operating over a shared, versioned repository state.
+1. Product concept
+Working name: Codebase Refactoring Control Plane
+The product takes:
+Messy / Vibe-Coded Repository
+        ↓
+Repository Intelligence
+        ↓
+Behavior & Architecture Discovery
+        ↓
+Messiness / Risk Detection
+        ↓
+Refactoring Plan
+        ↓
+Minimal Change Proposal
+        ↓
+Multi-Agent Review
+        ↓
+Sandboxed Implementation
+        ↓
+Automated Verification
+        ↓
+Independent Final Audit
+        ↓
+Human Approval
+        ↓
+Clean Repository + Explainable Report
+
+The most important distinction from existing coding agents is that your system should not optimize for “making the code prettier.”
+It should optimize for:
+Preserving behavior while progressively increasing engineering quality.
+
+2. The core principles
+I would make these hard invariants of the system.
+Principle 1 — Behavior preservation
+The system should assume:
+	Existing behavior is intentional unless proven otherwise.
+It shouldn't casually remove something because an agent thinks it is unnecessary.
+For example:
+// weird but working
+if (user && user.account && user.account.settings) {
+    ...
+}
+The system shouldn't automatically replace it just because optional chaining looks cleaner.
+Instead:
+Is this behavior exercised?
+↓
+Is the behavior understood?
+↓
+Can equivalence be demonstrated?
+↓
+Does the change reduce meaningful complexity?
+↓
+Is the change worth the risk?
+
+
+Principle 2 — Minimal diff
+Every proposed change should have a change budget.
+For example:
+Task:
+Extract authentication service
+Allowed:
+- Move authentication logic
+- Introduce interface
+- Add tests
+Not allowed:
+- Rename unrelated variables
+- Change API response format
+- Change database schema
+- Upgrade dependencies
+- Rewrite controllers
+The agent should actively reject scope creep.
+
+Principle 3 — Evidence before modification
+Every finding should contain:
+Finding
+↓
+Evidence
+↓
+Impact
+↓
+Confidence
+↓
+Recommended change
+↓
+Expected behavior preservation
+
+Not:
+	"This architecture is bad."
+Instead:
+	UserController.ts:183-247
+	Database access, validation, email delivery and HTTP response construction are performed in one function.
+	Evidence:
+		○ 4 database operations
+		○ 2 external API calls
+		○ 3 validation branches
+		○ 1 transaction boundary
+	Risk:
+	High coupling makes isolated testing difficult.
+	Proposed change:
+	Extract UserService while preserving the controller's public contract.
+That makes the product trustworthy.
+
+3. The agent architecture
+I would not create 30 agents that all randomly modify code.
+Instead, use approximately 14 specialized agents, divided into stages.
+Some agents should be read-only.
+Some can propose changes.
+Only a small number should actually modify the repository.
+
+4. Agent 1 — Repository Reconnaissance Agent
+Purpose
+Understand what actually exists.
+It answers:
+What is this repository?
+What technologies does it use?
+What runs it?
+What are its entry points?
+What are its services?
+What are its modules?
+What are its external dependencies?
+What configuration exists?
+What tests exist?
+What deployment mechanisms exist?
+Inputs
+Repository
+package manifests
+lockfiles
+Dockerfiles
+CI configuration
+environment configuration
+documentation
+source tree
+Outputs
+Create a machine-readable:
+{
+  "languages": [],
+  "frameworks": [],
+  "entrypoints": [],
+  "services": [],
+  "databases": [],
+  "external_integrations": [],
+  "test_frameworks": [],
+  "build_system": {},
+  "deployment": {},
+  "unknowns": []
+}
+Critical rule
+Read-only.
+It cannot modify anything.
+
+5. Agent 2 — Dependency & Build Agent
+Its job is understanding the project's actual dependency graph.
+It analyzes:
+direct dependencies
+transitive dependencies
+unused dependencies
+duplicate dependencies
+version inconsistencies
+circular dependencies
+build scripts
+runtime dependencies
+development dependencies
+package manager behavior
+It should distinguish:
+Definitely unused
+Probably unused
+Possibly dynamically used
+Unknown
+This is important because vibe-coded applications frequently have things like:
+package.json
+    ↓
+200 dependencies
+    ↓
+only 40 apparently used
+
+You don't want an agent deleting 160 packages without understanding dynamic imports, plugins, CLI usage, generated code, etc.
+
+6. Agent 3 — Architecture Discovery Agent
+This is one of the most important agents.
+It reconstructs the architecture from the code, rather than trusting README claims.
+For example:
+Frontend
+   ↓
+API layer
+   ↓
+Controllers
+   ↓
+Services
+   ↓
+Repositories
+   ↓
+Database
+
+But it might discover that reality is actually:
+React
+  ↓
+components
+  ↓
+random API calls
+  ↓
+utility functions
+  ↓
+database
+
+↘ Firebase
+          ↘ Supabase
+          ↘ REST API
+
+It generates:
+Actual Architecture
+and separately:
+Declared Architecture
+Then:
+Architecture Drift
+That distinction could become one of your strongest product features.
+
+7. Agent 4 — Code Quality / Smell Agent
+This agent detects mechanical issues.
+Examples:
+duplicated logic
+large functions
+large classes
+deep nesting
+dead code
+unused variables
+magic values
+poor naming
+complex conditionals
+repeated error handling
+duplicated configuration
+unreachable code
+God objects
+God functions
+But don't let it automatically fix these.
+It creates findings.
+
+8. Agent 5 — Software Principles Agent
+This is the higher-level engineering reviewer.
+It evaluates things such as:
+SOLID
+Single Responsibility
+Open/Closed
+Liskov Substitution
+Interface Segregation
+Dependency Inversion
+Other principles
+separation of concerns
+high cohesion
+low coupling
+DRY
+KISS
+YAGNI
+encapsulation
+composition
+dependency direction
+explicit boundaries
+error isolation
+testability
+But there should be an important rule:
+	A principle violation is not automatically a refactoring requirement.
+For example, duplicating 3 lines can sometimes be safer than creating an abstraction.
+So the agent should produce:
+Principle
+Evidence
+Severity
+Actual impact
+Suggested improvement
+Refactoring risk
+
+9. Agent 6 — Security Agent
+Read-only initially.
+It searches for:
+hardcoded secrets
+authentication weaknesses
+authorization gaps
+unsafe input handling
+injection risks
+unsafe file operations
+dependency vulnerabilities
+exposed endpoints
+weak session handling
+sensitive logging
+insecure configuration
+It should classify:
+Critical
+High
+Medium
+Low
+Informational
+And importantly:
+Security findings should be separated from stylistic refactoring.
+You don't want a giant cleanup operation mixing security remediation with cosmetic changes.
+
+10. Agent 7 — Data & Persistence Agent
+This agent specializes in:
+database access
+ORM usage
+queries
+transactions
+migrations
+models
+repositories
+connection handling
+caching
+data validation
+data consistency
+It should discover things like:
+HTTP handler
+   ↓
+direct SQL
+   ↓
+email
+   ↓
+another API
+   ↓
+database mutation
+
+and identify transaction boundaries and potential consistency problems.
+Again:
+Don't change anything yet.
+
+11. Agent 8 — API & Contract Agent
+This is extremely important for preserving functionality.
+It builds a contract map:
+endpoint
+method
+request
+authentication
+authorization
+validation
+response
+errors
+side effects
+external calls
+For example:
+POST /api/orders
+Input:
+{
+  productId,
+  quantity
+}
+Output:
+{
+  id,
+  status
+}
+Side effects:
+- database insert
+- payment request
+- email
+This becomes part of the behavioral baseline.
+If an agent later modifies the implementation, this agent checks whether the contract remains intact.
+
+12. Agent 9 — Test & Behavioral Baseline Agent
+This may be the most important safety component.
+Before refactoring, establish:
+What currently works?
+It should discover:
+unit tests
+integration tests
+E2E tests
+snapshot tests
+API tests
+CLI tests
+build tests
+type checks
+lint
+runtime behavior
+Then generate missing behavioral tests where safely possible.
+For example:
+POST /login
+    ↓
+baseline test
+    ↓
+record:
+    status
+    response structure
+    database effects
+    cookies
+    redirects
+
+This gives the system something to compare against.
+
+13. Agent 10 — Refactoring Planner
+Only after all the previous agents have produced evidence.
+This agent takes:
+repository map
+architecture map
+code smells
+security findings
+API contracts
+test coverage
+dependency graph
+behavioral baseline
+and creates a refactoring DAG.
+Example:
+R001
+Extract configuration
+   ↓
+R002
+Create database boundary
+   ↓
+R003
+Extract authentication service
+   ↓
+R004
+Separate controller responsibilities
+   ↓
+R005
+Remove duplicate validation
+
+Rather than:
+"Rewrite the backend."
+Every change must be atomic.
+
+14. Agent 11 — Minimality Agent
+This is a unique agent I would absolutely include.
+Its job is to challenge every proposed change.
+For each proposed refactor:
+Could this be done with fewer files?
+Could this be done with fewer lines?
+Could this be done without changing public interfaces?
+Could this be done without changing dependencies?
+Could this be done without changing behavior?
+Is this abstraction actually necessary?
+It can reject plans.
+Example:
+Planner:
+Create 7 new abstractions.
+Minimality Agent:
+Rejected.
+Evidence:
+Only two call sites exist.
+Alternative:
+Extract one shared function.
+This agent is essentially the system's anti-overengineering mechanism.
+
+15. Agent 12 — Implementation Agent
+This is one of the few agents allowed to modify code.
+It receives exactly:
+approved refactoring
+scope
+constraints
+files allowed to change
+expected behavior
+tests required
+architecture target
+It should work in an isolated branch/worktree.
+For example:
+main
+ │
+ └── refactor/R017
+
+It cannot modify outside the declared scope without asking the orchestrator.
+
+16. Agent 13 — Refactoring Reviewer
+This is an independent reviewer.
+It receives:
+BEFORE
+AFTER
+TASK
+ARCHITECTURAL INTENT
+and asks:
+Did implementation match the plan?
+Did behavior change?
+Did scope expand?
+Did unnecessary abstractions appear?
+Were unrelated files modified?
+Was complexity actually reduced?
+Were new bugs introduced?
+Were original conventions respected?
+Crucially:
+It should not know the implementation agent's internal reasoning.
+That reduces confirmation bias.
+
+17. Agent 14 — Verification Agent
+This agent executes the verification pipeline.
+Potential sequence:
+format
+↓
+lint
+↓
+type check
+↓
+unit tests
+↓
+integration tests
+↓
+E2E tests
+↓
+build
+↓
+security scan
+↓
+dependency scan
+↓
+behavioral comparison
+
+It produces:
+PASS
+FAIL
+BLOCKED
+NOT_APPLICABLE
+Never simply:
+Looks good.
+
+18. Agent 15 — Regression / Behavioral Equivalence Agent
+I'd actually separate this from the generic verification agent.
+Its question is:
+	Did the software remain the same from the user's perspective?
+Compare:
+BEFORE
+        VS
+AFTER
+Across:
+API responses
+HTTP status codes
+UI behavior
+database effects
+CLI behavior
+files produced
+events emitted
+logs where relevant
+external calls
+error behavior
+It can use:
+golden tests
+snapshot comparisons
+contract tests
+record/replay
+property tests
+E2E tests
+runtime instrumentation
+
+19. Agent 16 — Final Architecture Auditor
+Finally, a completely independent agent gets the repository.
+It asks:
+Did we actually improve architecture?
+Did we introduce new coupling?
+Are dependency directions correct?
+Are responsibilities clearer?
+Are boundaries explicit?
+Is the resulting architecture understandable?
+Did we preserve the product's original intent?
+Did we accidentally redesign anything?
+It produces the final report.
+
+20. So the final agent topology
+I'd structure it like this:
+                    ORCHESTRATOR
+                         │
+             ┌───────────┴───────────┐
+             │                       │
+       DISCOVERY POOL           SAFETY POOL
+             │                       │
+     ┌───────┼────────┐        ┌─────┴──────┐
+     │       │        │        │            │
+   Repo   Arch.   Dependency  Security   Behavior
+   Agent  Agent     Agent       Agent      Agent
+     │       │        │          │           │
+     └───────┴────────┴──────────┴───────────┘
+                         │
+                   ANALYSIS POOL
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+     Quality         Principles        Contracts
+      Agent            Agent            Agent
+        │                │                │
+        └────────────────┼────────────────┘
+                         │
+                  REFACTOR PLANNER
+                         │
+                  MINIMALITY AGENT
+                         │
+                  APPROVAL GATE
+                         │
+                 IMPLEMENTATION AGENT
+                         │
+                ┌────────┴─────────┐
+                │                  │
+           REVIEW AGENT      VERIFICATION
+                │                  │
+                └────────┬─────────┘
+                         │
+                 REGRESSION AGENT
+                         │
+                  ARCHITECTURE AUDIT
+                         │
+                    FINAL GATE
+                         │
+                   HUMAN APPROVAL
+
+
+21. Don't make it a simple linear pipeline
+This is important.
+You want a state machine, not:
+Agent 1 → Agent 2 → Agent 3 → Agent 4
+
+Instead:
+                 ┌───────────────┐
+                 │   Discovery   │
+                 └───────┬───────┘
+                         ↓
+                    Analysis
+                         ↓
+                 ┌───────┴───────┐
+                 ↓               ↓
+              Security       Architecture
+                 ↓               ↓
+                 └───────┬───────┘
+                         ↓
+                      Planning
+                         ↓
+                    Minimality
+                         ↓
+                    Risk Gate
+                    ↙         ↘
+                 reject       approve
+                               ↓
+                         Implementation
+                               ↓
+                         Verification
+                         ↙     ↓      ↘
+                      fail   partial   pass
+                        ↓       ↓       ↓
+                     repair   review   next
+                        ↓
+                   Verification
+
+Every stage can cause:
+RETRY
+REPLAN
+BLOCK
+ESCALATE
+APPROVE
+
+22. The central object: Change Proposal
+This should become the fundamental unit of your platform.
+Every modification becomes a structured object.
+Something like:
+{
+  "id": "RFC-017",
+  "title": "Extract authentication logic",
+  "reason": "...",
+  "problem": "...",
+  "evidence": [],
+  "files_in_scope": [],
+  "files_out_of_scope": [],
+  "behavior_contracts": [],
+  "risk": "medium",
+  "expected_benefit": [],
+  "constraints": [],
+  "minimal_change": true,
+  "tests_required": [],
+  "rollback_strategy": {},
+  "approval_status": "pending"
+}
+Agents don't just "edit code."
+They operate on Change Proposals.
+
+23. Give every change a risk score — internally
+You don't need to expose a simplistic score to users, but the orchestrator should calculate risk based on things such as:
+files affected
+lines changed
+public API touched
+database touched
+authentication touched
+dependency changes
+concurrency changes
+external integrations
+test coverage
+runtime uncertainty
+architecture boundary changes
+Example:
+R017
+Files: 4
+Lines: +82 / -51
+Public API: No
+Database: No
+Dependencies: No
+Tests: 87%
+Risk: Moderate
+Then enforce rules.
+For example:
+Low risk
+→ automated
+
+Medium risk
+→ multi-agent approval
+
+High risk
+→ mandatory human approval
+
+
+24. Introduce a "Change Firewall"
+This could become one of the defining features of the product.
+Before an implementation agent modifies anything:
+                CHANGE FIREWALL
+Allowed files:
+✓ src/auth/*
+✓ tests/auth/*
+Forbidden:
+✗ database/*
+✗ infrastructure/*
+✗ package.json
+✗ public API
+Allowed operations:
+✓ move functions
+✓ extract class
+✓ introduce interface
+✓ add tests
+Forbidden:
+✗ dependency upgrades
+✗ schema changes
+✗ API changes
+✗ behavior changes
+If the agent attempts something outside the policy:
+BLOCK
+The orchestrator decides whether to expand scope.
+This is much safer than trusting prompts.
+
+25. Use Git as the transactional layer
+Every meaningful operation should happen in an isolated Git worktree.
+For example:
+main
+ │
+ ├── analysis/*
+ │
+ ├── refactor/RFC-001
+ │
+ ├── refactor/RFC-002
+ │
+ └── repair/RFC-002-attempt-2
+
+Never allow an agent to directly mutate the user's primary branch.
+Then:
+Agent changes
+↓
+tests
+↓
+review
+↓
+verification
+↓
+commit
+
+If anything fails:
+discard worktree
+or:
+rollback commit
+
+26. Build a repository knowledge graph
+This is another major architectural component.
+Instead of every agent independently reading the repository, create a shared graph.
+For example:
+Repository
+ │
+ ├── Module
+ │    ├── Function
+ │    ├── Class
+ │    ├── Dependency
+ │    └── Test
+ │
+ ├── API
+ │    ├── Endpoint
+ │    ├── Request
+ │    └── Response
+ │
+ ├── Database
+ │    ├── Table
+ │    ├── Query
+ │    └── Migration
+ │
+ └── External Service
+      ├── Stripe
+      ├── AWS
+      └── SendGrid
+
+Relationships:
+CALLS
+IMPORTS
+EXTENDS
+IMPLEMENTS
+READS
+WRITES
+TESTS
+EXPOSES
+DEPENDS_ON
+CONFIGURED_BY
+Then an agent can ask:
+"What depends on this function?"
+"What APIs expose this service?"
+"What tests cover this module?"
+"What external behavior could this change affect?"
+This dramatically improves orchestration.
+
+27. Build a "Software Truth Model"
+I would make this a first-class artifact.
+The system maintains three models:
+1. Intended model
+What documentation says the application does.
+2. Observed model
+What the code actually does.
+3. Verified model
+What tests/runtime observation prove it does.
+For example:
+INTENDED
+Authentication
+   ↓
+Auth Service
+   ↓
+User Repository
+
+OBSERVED
+Login Controller
+   ↓
+Firebase
+   ↓
+User DB
+   ↓
+Email service
+
+VERIFIED
+POST /login
+   ↓
+200
+   ↓
+session cookie
+   ↓
+user lookup
+
+Then the product can tell the developer:
+	"Your documentation describes architecture A, but the implementation currently behaves like architecture B. The following differences were observed."
+That's extremely valuable for vibe-coded applications.
+
+28. The UI should not just show "AI fixed your code"
+Your UI should expose the reasoning chain.
+Something like:
+PROJECT HEALTH
+Architecture       61%
+Maintainability    48%
+Testing            34%
+Security           76%
+Dependency Hygiene 52%
+Documentation      39%
+But don't reduce everything to arbitrary scores as the primary interface.
+Instead:
+127 findings
+12 Critical
+23 High
+51 Medium
+41 Low
+Then:
+Architecture
+8 findings
+3 dependency-direction violations
+2 circular dependencies
+2 mixed responsibilities
+1 architectural drift
+
+29. Give users a "What exists?" view
+This is a major part of your idea.
+The user should be able to ask:
+	"What is actually in my application?"
+And get:
+Frontend
+├── React
+├── 47 components
+├── 13 hooks
+└── 6 API clients
+
+Backend
+├── Node.js
+├── Express
+├── 31 routes
+├── 18 services
+└── 9 repositories
+
+Database
+├── PostgreSQL
+├── 24 tables
+└── 18 migrations
+
+External systems
+├── Stripe
+├── S3
+└── SendGrid
+
+Then:
+	"What's missing?"
+Testing
+├── Missing integration tests
+├── Missing authorization tests
+└── 6 critical paths untested
+
+Architecture
+├── No explicit service boundary
+├── Direct database access from controllers
+└── Circular dependency detected
+
+
+30. Give every finding an explanation
+For example:
+FND-019
+Direct database access from HTTP controller
+Location:
+src/routes/orders.ts:143
+Why this matters:
+The HTTP layer currently owns persistence logic.
+Evidence:
+- 6 SQL queries
+- transaction handling
+- validation
+- response formatting
+Potential consequence:
+Changes to persistence require modifying the API layer.
+Recommended change:
+Move persistence operations into OrderRepository.
+Behavior impact:
+Expected none.
+Confidence:
+94%
+Status:
+Proposed
+This is how you make developers trust it.
+
+31. The system should learn the project's existing style
+Don't impose one architecture everywhere.
+This is critical.
+A Python Django application shouldn't automatically be transformed into:
+controllers/
+services/
+repositories/
+interfaces/
+factories/
+adapters/
+just because an agent thinks that's "clean."
+Instead:
+Existing conventions
+        ↓
+Identify patterns
+        ↓
+Determine whether they work
+        ↓
+Improve within existing paradigm
+
+Your principle should be:
+	Adapt engineering principles to the existing technology and architecture rather than forcing a universal architecture onto every repository.
+
+32. Framework-agnostic architecture
+The core system should have no assumptions about:
+React
+Next.js
+Django
+Rails
+Laravel
+Spring
+Go
+Rust
+.NET
+Node
+Python
+Instead create adapters.
+                 CORE ENGINE
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+     Language Layer          Runtime Layer
+          │                       │
+    ┌─────┼─────┐          ┌──────┼──────┐
+    │     │     │          │      │      │
+   TS    Py    Go        Node   Python   JVM
+
+Then:
+Framework Adapter
+Language Analyzer
+Build Adapter
+Test Adapter
+Package Manager Adapter
+Runtime Adapter
+The agent doesn't need to know:
+	"This is Next.js."
+It should receive normalized capabilities:
+find_entrypoints()
+find_routes()
+find_dependencies()
+run_tests()
+run_build()
+inspect_database()
+trace_runtime()
+
+33. Use deterministic tools underneath the agents
+This is extremely important.
+Don't ask an LLM to determine everything.
+Use:
+AST parsers
+LSP
+tree-sitter
+language servers
+static analyzers
+dependency graphs
+Git
+test runners
+linters
+formatters
+type checkers
+security scanners
+coverage tools
+runtime tracing
+Then agents interpret the evidence.
+Think:
+Deterministic tools
+        ↓
+Facts
+        ↓
+Agents
+        ↓
+Reasoning
+        ↓
+Plan
+        ↓
+Deterministic verification
+
+not:
+LLM
+↓
+"trust me, the code is better"
+
+
+34. Introduce a two-key modification system
+For risky changes:
+Implementation Agent
+        +
+Independent Reviewer
+        ↓
+      APPROVE
+
+Neither agent alone can approve.
+For very high-risk changes:
+Implementation
+     ↓
+Reviewer
+     ↓
+Verification
+     ↓
+Human
+
+This creates an actual safety architecture.
+
+35. Never let the same agent verify its own work
+This should be a hard rule.
+Bad:
+Coder Agent
+   ↓
+"Looks good."
+
+Better:
+Coder
+  ↓
+Independent Reviewer
+  ↓
+Independent Tests
+  ↓
+Behavior Agent
+  ↓
+Architecture Agent
+
+And ideally the reviewers receive the actual diff and evidence, not merely the implementation agent's explanation.
+
+36. Use a repair loop
+When verification fails:
+Implementation
+      ↓
+Verification
+      ↓
+FAIL
+      ↓
+Failure classifier
+      ↓
+Repair plan
+      ↓
+Implementation
+      ↓
+Verification
+
+But put a hard limit on retries.
+For example:
+Maximum automatic repair attempts = 3
+After that:
+Human intervention required.
+Otherwise agents can get stuck in:
+fix
+break
+fix
+break
+fix
+break
+
+37. Create "Do Not Touch" zones
+Before analysis, let the system identify:
+generated files
+vendor directories
+migration history
+public contracts
+deployment configuration
+legacy compatibility layers
+third-party integrations
+Some should automatically become:
+protected
+unless specifically approved.
+
+38. The final output should be a Software Engineering Report
+After the process:
+PROJECT: MyApp
+Original behavior:
+Preserved
+Changes:
+37
+Files changed:
+24
+Files untouched:
+1,847
+Architecture improvements:
+8
+Security fixes:
+3
+Tests added:
+41
+Tests modified:
+7
+Dependencies changed:
+0
+Public APIs changed:
+0
+Then:
+What changed
+1. Extracted authentication logic
+2. Removed duplicated validation
+3. Introduced database boundary
+4. Added missing integration tests
+5. Removed confirmed dead code
+What did NOT change
+- API contracts
+- database schema
+- user flows
+- external integrations
+- authentication behavior
+- deployment process
+That second section is incredibly important for user confidence.
+
+39. Show before/after architecture
+For example:
+BEFORE
+Controller
+ ├── validation
+ ├── database
+ ├── payment
+ ├── email
+ └── response
+
+AFTER
+Controller
+    │
+    ↓
+OrderService
+ ├── PaymentService
+ ├── EmailService
+ └── OrderRepository
+
+Then explain:
+Why:
+The controller previously owned four unrelated responsibilities.
+Change:
+Only responsibility boundaries were moved.
+Behavior:
+No public API changes detected.
+
+40. The orchestration engine
+I would make the orchestrator deterministic.
+Something conceptually like:
+Workflow
+│
+├── Discovery
+│
+├── Baseline
+│
+├── Analysis
+│
+├── Findings aggregation
+│
+├── Prioritization
+│
+├── Refactoring planning
+│
+├── Minimality review
+│
+├── Risk gate
+│
+├── Implementation
+│
+├── Static verification
+│
+├── Behavioral verification
+│
+├── Architecture review
+│
+├── Regression review
+│
+└── Final approval
+
+The LLM agents should be workers inside this workflow, not the workflow itself.
+That's a crucial architectural distinction.
+
+41. I would divide your product into 5 major systems
+┌─────────────────────────────────────────┐
+│             USER EXPERIENCE             │
+├─────────────────────────────────────────┤
+│         SOFTWARE INTELLIGENCE            │
+├─────────────────────────────────────────┤
+│          AGENT ORCHESTRATION             │
+├─────────────────────────────────────────┤
+│          EXECUTION SANDBOX               │
+├─────────────────────────────────────────┤
+│        LANGUAGE/FRAMEWORK ADAPTERS       │
+└─────────────────────────────────────────┘
+
+A. User Experience
+Repository dashboard, findings, architecture map, proposed changes, diffs, reports, approvals.
+B. Software Intelligence
+AST, dependency graph, code graph, behavioral model, architecture model.
+C. Agent Orchestration
+Agent lifecycle, task allocation, evidence exchange, gates, retries, approvals.
+D. Execution Sandbox
+Git worktrees, containers, test execution, builds, runtime instrumentation.
+E. Adapters
+Languages, frameworks, package managers, databases, test runners, deployment systems.
+
+42. One major architectural decision: agents shouldn't share arbitrary conversation
+Don't create:
+Agent A chat history
+       ↓
+Agent B chat history
+       ↓
+Agent C chat history
+
+Instead create a structured Evidence Store.
+For example:
+/evidence
+   /repository
+   /architecture
+   /dependencies
+   /security
+   /behavior
+   /tests
+   /findings
+   /proposals
+   /verification
+Agents write structured evidence.
+Other agents consume it.
+That makes the system:
+auditable
+reproducible
+debuggable
+cheaper
+less hallucination-prone
+
+43. Your agent contract
+Every agent should implement something like:
+Agent
+├── identity
+├── capabilities
+├── inputs
+├── outputs
+├── tools
+├── permissions
+├── constraints
+├── confidence
+└── completion criteria
+
+Example:
+SecurityAgent
+CAN:
+✓ inspect source
+✓ inspect dependencies
+✓ inspect configuration
+CANNOT:
+✗ modify code
+✗ install packages
+✗ modify infrastructure
+MUST PRODUCE:
+✓ findings
+✓ evidence
+✓ confidence
+✓ severity
+✓ remediation proposal
+This makes the framework extensible.
+
+44. The most important product feature: explainability
+The product shouldn't say:
+	"AI refactored your project."
+It should say:
+	We found 83 engineering issues.
+Then:
+83 findings
+│
+├── 14 architectural
+├── 21 maintainability
+├── 8 security
+├── 12 testing
+├── 17 dependency
+└── 11 documentation
+
+Then:
+	19 changes were proposed.
+Then:
+	11 changes were automatically applied.
+Then:
+	8 were rejected because risk exceeded the allowed threshold.
+And:
+	0 public API changes were detected.
+That's a much stronger product proposition.
+
+45. Your MVP should NOT build all 16 agents
+For the first version, I'd build only:
+Phase 1
+1. Repository Recon Agent
+2. Architecture Discovery Agent
+3. Code Quality Agent
+4. Security Agent
+5. Behavioral/Test Agent
+6. Refactoring Planner
+7. Minimality Reviewer
+8. Implementation Agent
+9. Verification Agent
+10. Final Reviewer
+That's enough to prove the concept.
+Then add specialized agents.
+
+46. MVP workflow
+A user's experience could literally be:
+Connect Repository
+       ↓
+Analyze
+       ↓
+"Your codebase has been mapped."
+       ↓
+View Architecture
+       ↓
+View Findings
+       ↓
+"Generate cleanup plan"
+       ↓
+Review proposed changes
+       ↓
+"Apply safe changes"
+       ↓
+Sandbox
+       ↓
+Tests
+       ↓
+Independent review
+       ↓
+Diff
+       ↓
+Approve
+       ↓
+Merge
+
+
+47. Your killer feature could be "Minimal Refactor Mode"
+Give users explicit modes:
+┌─────────────────────────┐
+│ Minimal Refactor        │
+│                         │
+│ Preserve behavior       │
+│ Preserve APIs           │
+│ Preserve dependencies   │
+│ Smallest possible diff  │
+│ No redesign             │
+└─────────────────────────┘
+
+And:
+┌─────────────────────────┐
+│ Architecture Mode       │
+│                         │
+│ Allow larger boundaries │
+│ Allow restructuring     │
+│ Preserve contracts      │
+└─────────────────────────┘
+
+And eventually:
+┌─────────────────────────┐
+│ Modernization Mode      │
+│                         │
+│ Larger architectural    │
+│ transformations         │
+└─────────────────────────┘
+
+This solves an important problem: not every user wants the same degree of intervention.
+
+48. The deepest product philosophy
+I would define the system around this sentence:
+	"We don't rewrite your software. We build an evidence-backed understanding of it, identify engineering risks, and make the smallest verified changes necessary to improve it."
+That is much more defensible than:
+	"Our agents turn bad code into perfect code."
+Because there is no objectively "perfect" architecture for every codebase.
+Your actual product promise should be closer to:
+Understand
+       ↓
+Preserve
+       ↓
+Improve
+       ↓
+Verify
+       ↓
+Explain
+
+
+49. The ultimate architecture
+Putting everything together:
+                         USER
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │   CONTROL PLANE  │
+                 └────────┬────────┘
+                          │
+                    Workflow Engine
+                          │
+              ┌───────────┴───────────┐
+              │                       │
+              ▼                       ▼
+       Repository Graph          Evidence Store
+              │                       │
+              └───────────┬───────────┘
+                          │
+                    AGENT POOLS
+                          │
+       ┌──────────────────┼──────────────────┐
+       │                  │                  │
+       ▼                  ▼                  ▼
+   Discovery          Analysis           Safety
+   Agents             Agents             Agents
+       │                  │                  │
+       └──────────────────┼──────────────────┘
+                          ▼
+                   Finding Engine
+                          │
+                          ▼
+                  Refactoring Planner
+                          │
+                          ▼
+                    Minimality Agent
+                          │
+                          ▼
+                     Risk Engine
+                          │
+                 ┌────────┴────────┐
+                 │                 │
+               Reject            Approve
+                                   │
+                                   ▼
+                           Change Firewall
+                                   │
+                                   ▼
+                         Isolated Worktree
+                                   │
+                                   ▼
+                         Implementation Agent
+                                   │
+                                   ▼
+                         Independent Review
+                                   │
+                                   ▼
+                          Verification Pool
+                         /       |        \
+                       Static  Runtime   Behavior
+                         \       |        /
+                          \      |       /
+                           ▼     ▼      ▼
+                          Regression
+                               │
+                               ▼
+                       Architecture Audit
+                               │
+                               ▼
+                         Final Change Set
+                               │
+                               ▼
+                         Human Approval
+                               │
+                               ▼
+                            MERGE
+50. If I were building it, I'd make these the non-negotiables
+	1. No blind autonomous rewriting.
+	2. Read-only discovery before modification.
+	3. Behavioral baseline before refactoring.
+	4. Every change represented as a structured proposal.
+	5. Minimal-diff enforcement.
+	6. Explicit file/scope permissions.
+	7. Independent reviewer agents.
+	8. Deterministic tests and static tooling around LLMs.
+	9. Isolated Git worktrees for every change.
+	10. Automatic rollback on failed verification.
+	11. Human approval for high-risk changes.
+	12. Complete before/after explanation.
+	13. Framework-specific adapters, framework-agnostic core.
+	14. Evidence store instead of agent-to-agent chat.
+	15. Never force an architecture merely because it is fashionable.
+	16. Preserve existing behavior unless a change is explicitly authorized.
+	17. Show users what the system knows, what it suspects, and what it cannot verify.
+The really interesting part is that the moat isn't the individual coding agents. Models will change rapidly. The defensible part is the system around them: repository intelligence + behavioral baselines + change contracts + minimality enforcement + independent verification + reproducible orchestration.
+That is what could turn this from "another AI code fixer" into an actual software-engineering control system for vibe-coded applications.

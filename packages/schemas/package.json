@@ -1,0 +1,22 @@
+{
+  "name": "@vibefix/schemas",
+  "version": "0.1.0",
+  "description": "Zod schemas + TypeScript contracts for VibeFix artifacts (browser-safe, zero I/O)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}
