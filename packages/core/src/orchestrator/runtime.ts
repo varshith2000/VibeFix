@@ -62,6 +62,14 @@ export class OrchestratorRuntime {
     return this.deps.store;
   }
 
+  get usage(): { total: number; byAgent: Record<string, number>; byProvider: Record<string, number> } {
+    return this.deps.meter.usage();
+  }
+
+  get meter(): BudgetMeter {
+    return this.deps.meter;
+  }
+
   snapshot(): RunState {
     return structuredClone(this.state);
   }

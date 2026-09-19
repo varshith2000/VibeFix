@@ -12,8 +12,11 @@ import {
   type RefactoringMode,
 } from "@vibefix/schemas";
 import { AGENT_DEFINITIONS } from "@vibefix/agents";
-import { loadRepoConfig, saveRepoConfig, runPaths } from "@vibefix/core";
+import { NodeFsFacts, runCommand } from "@vibefix/adapters";
+import { loadRepoConfig, saveRepoConfig, runPaths, clonesDir } from "@vibefix/core";
 import { promises as fs } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { ProjectRegistry, decodePath, encodePath } from "./projects.js";
 
 export interface BuildAppOptions {
@@ -21,13 +24,128 @@ export interface BuildAppOptions {
   autoApproveMock?: boolean;
 }
 
+/** Events that change RunState/usage and therefore trigger a WS snapshot. */
+const SNAPSHOT_EVENTS = new Set([
+  "phase.entered",
+  "phase.completed",
+  "agent.started",
+  "agent.completed",
+  "agent.failed",
+  "agent.rejected",
+  "checkpoint.awaitingApproval",
+  "checkpoint.approved",
+  "proposal.verdict",
+  "ledger.updated",
+  "run.aborted",
+  "run.completed",
+  "run.failed",
+]);
+
 export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {}) {
   const app = Fastify({ logger: { level: process.env.VIBEFIX_LOG === "debug" ? "debug" : "warn" } });
   void app.register(websocket);
   void app.register(cors, { origin: true });
 
+  void options;
+
   // ---------- catalog ----------
   app.get("/api/agents", async () => AGENT_DEFINITIONS);
+
+  // ---------- GitHub clone ----------
+  app.post<{ Body: { url: string; token?: string } }>("/api/projects/clone", async (req, reply) => {
+    const { url, token } = req.body;
+    if (!url || !/^https:\/\/(www\.)?github\.com\/[\w.-]+\/[\w.-]+(\/)?$/.test(url.replace(/\.git$/, ""))) {
+      return reply.code(400).send({ error: "provide a GitHub URL like https://github.com/owner/repo" });
+    }
+    const name = url.replace(/\/$/, "").split("/").pop()!.replace(/\.git$/, "");
+    await fs.mkdir(clonesDir(), { recursive: true });
+    let target = path.join(clonesDir(), name);
+    let n = 2;
+    while (await fs.stat(target).then(() => true).catch(() => false)) {
+      target = path.join(clonesDir(), `${name}-${n++}`);
+    }
+    // Token (optional, private repos) is injected into the clone URL only — never logged or stored.
+    const cloneUrl = token ? url.replace("https://", `https://x-access-token:${encodeURIComponent(token)}@`) : url;
+    const res = await runCommand("git", ["clone", cloneUrl, target], { cwd: clonesDir(), timeoutMs: 300_000 });
+    if (res.code !== 0) {
+      await fs.rm(target, { recursive: true, force: true }).catch(() => undefined);
+      return reply.code(400).send({ error: `git clone failed: ${res.stderr.slice(0, 300)}` });
+    }
+    return { repoPath: target, name: path.basename(target) };
+  });
+
+  // ---------- local folder picker ----------
+  app.get("/api/fs/browse", async (req) => {
+    const requested = (req.query as { path?: string }).path;
+    const dir = requested && requested.trim().length > 0 ? path.resolve(requested) : homedir();
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return { path: dir, parent: path.dirname(dir), dirs: [], error: "cannot read this location" };
+    }
+    const dirs = entries
+      .filter(
+        (e) =>
+          e.isDirectory() &&
+          !e.name.startsWith(".") &&
+          !["node_modules", "windows", "$recycle.bin", "system volume information"].includes(e.name.toLowerCase()),
+      )
+      .map((e) => e.name)
+      .sort();
+    return { path: dir, parent: path.dirname(dir) === dir ? null : path.dirname(dir), dirs };
+  });
+
+  // ---------- repo codebase viewer ----------
+  app.get("/api/projects/:enc/tree", async (req, reply) => {
+    const repoPath = decodePath((req.params as { enc: string }).enc);
+    try {
+      const snapshot = await new NodeFsFacts().snapshot(repoPath);
+      return {
+        files: snapshot.files
+          .filter((f) => f.sizeBytes < 2_000_000)
+          .map((f) => ({ path: f.path, language: f.language, loc: f.loc }))
+          .slice(0, 5_000),
+        summary: {
+          languages: snapshot.languages,
+          frameworks: snapshot.frameworks.map((f) => f.name),
+          totalLoc: snapshot.totalLoc,
+          entrypoints: snapshot.entrypoints,
+        },
+      };
+    } catch (err) {
+      return reply.code(400).send({ error: String(err) });
+    }
+  });
+
+  app.get("/api/projects/:enc/file", async (req, reply) => {
+    const repoPath = decodePath((req.params as { enc: string }).enc);
+    const rel = (req.query as { path?: string }).path ?? "";
+    const abs = path.resolve(repoPath, rel);
+    if (!abs.startsWith(path.resolve(repoPath))) {
+      return reply.code(400).send({ error: "path escapes the repository" });
+    }
+    try {
+      const stat = await fs.stat(abs);
+      if (stat.size > 500_000) return { path: rel, content: "(file too large to display)", truncated: true };
+      return { path: rel, content: await fs.readFile(abs, "utf8"), truncated: false };
+    } catch {
+      return reply.code(404).send({ error: "file not found" });
+    }
+  });
+
+  // ---------- open a previous run for viewing/resume ----------
+  app.post("/api/projects/:enc/runs/:runId/open", async (req, reply) => {
+    const { enc, runId } = req.params as { enc: string; runId: string };
+    try {
+      const manager = await registry.open(decodePath(enc));
+      const runtime = await manager.loadRun(runId);
+      registry.registerRuntime(runtime, manager.repoPath);
+      return { runId, state: runtime.snapshot() };
+    } catch (err) {
+      return reply.code(404).send({ error: String(err instanceof Error ? err.message : err) });
+    }
+  });
 
   // ---------- project ----------
   app.post<{ Body: { repoPath: string } }>("/api/projects", async (req, reply) => {
@@ -104,6 +222,13 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
     const runtime = getRuntime(runId);
     if (!runtime) return reply.code(404).send({ error: "unknown run (restart server?)" });
     return runtime.snapshot();
+  });
+
+  app.get("/api/runs/:runId/usage", async (req, reply) => {
+    const { runId } = req.params as { runId: string };
+    const entry = registry.runtime(runId);
+    if (!entry) return reply.code(404).send({ error: "unknown run" });
+    return entry.runtime.usage;
   });
 
   app.get("/api/runs/:runId/events", async (req) => {
@@ -226,13 +351,14 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
     });
     const unsubscribe = runtime.events.subscribe((event: AgentExecutionEvent) => {
       send({ t: "event", event, seq: event.seq });
-      if (event.type === "phase.completed" || event.type === "checkpoint.awaitingApproval") {
+      // Snapshot on state-changing events so the UI can never go stale.
+      if (SNAPSHOT_EVENTS.has(event.type)) {
         send({ t: "snapshot", state: runtime.snapshot() });
+        send({ t: "usage", usage: runtime.usage });
       }
     });
     socket.on("close", () => unsubscribe());
   });
 
-  void options;
   return app;
 }

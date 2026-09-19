@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { GitTool } from "@vibefix/adapters";
-import { runPaths } from "../store/paths.js";
+import { worktreesDir } from "../store/paths.js";
 
 export interface WorktreeHandle {
   proposalId: string;
@@ -24,14 +24,15 @@ export class WorktreeManager {
     this.git = new GitTool(repoPath);
   }
 
-  private get worktreesDir(): string {
-    return path.join(this.repoPath, ".vibefix", "worktrees");
+  /** Worktrees live in the central workspace, never inside the target repo. */
+  private get worktreesRoot(): string {
+    return worktreesDir(this.repoPath);
   }
 
   async create(proposalId: string, attempt: number): Promise<WorktreeHandle> {
     const slug = `${proposalId.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-a${attempt}`;
     const branch = `vibefix/${slug}`;
-    const wtPath = path.join(this.worktreesDir, slug);
+    const wtPath = path.join(this.worktreesRoot, slug);
     await fs.mkdir(path.dirname(wtPath), { recursive: true });
     const res = await this.git.addWorktree(wtPath, branch);
     if (res.code !== 0) {
@@ -75,7 +76,7 @@ export class WorktreeManager {
 
   /** Best-effort cleanup of all vibefix worktrees (abort, CLI clean, exit). */
   async cleanupAll(): Promise<void> {
-    const dir = this.worktreesDir;
+    const dir = this.worktreesRoot;
     let entries: string[];
     try {
       entries = await fs.readdir(dir);

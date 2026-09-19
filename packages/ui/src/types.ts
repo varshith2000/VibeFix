@@ -80,6 +80,12 @@ export interface ChangeProposal {
   priority: number;
   allowedInModes: string[];
   approvalStatus: string;
+  explanation?: {
+    currentState: string;
+    proposedState: string;
+    whyItMatters: string;
+  };
+  beforeAfterDiagram?: string;
 }
 
 export interface LedgerEntry {
@@ -126,7 +132,18 @@ export interface RepoConfig {
 
 export interface Report {
   stateOfCodebase: string;
-  changeExplainers: Array<{ proposalId: string; what: string; why: string; principle: string }>;
+  existingArchitecture?: string;
+  existingArchitectureDiagram?: string;
+  changeExplainers: Array<{
+    proposalId: string;
+    what: string;
+    why: string;
+    principle: string;
+    currentState?: string;
+    proposedState?: string;
+    whyItMatters?: string;
+    beforeAfterDiagram?: string;
+  }>;
   whatDidNotChange: string[];
   learningSummary: string;
   totals: {

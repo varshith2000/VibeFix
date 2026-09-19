@@ -239,7 +239,7 @@ export function SettingsPanel({
                   (priciest routed provider × full token cap; real spend is usually far lower). The run hard-stops at the cap.
                 </>
               ) : (
-                "No priced providers routed — runs are effectively free (mocks/Ollama)."
+                "No priced providers routed — runs are effectively free (local Ollama or no key set)."
               )}
             </p>
           )}

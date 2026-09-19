@@ -28,6 +28,18 @@ export const RollbackStrategySchema = z.object({
 export type RollbackStrategy = z.infer<typeof RollbackStrategySchema>;
 
 /**
+ * Human-facing explanation attached to a proposal by Synthesis: what exists
+ * today, what will exist after, and why the difference matters. Optional so
+ * older artifacts keep decoding (additive schema evolution).
+ */
+export const ProposalExplanationSchema = z.object({
+  currentState: z.string().describe("How this part of the system works today"),
+  proposedState: z.string().describe("How it will work after this change"),
+  whyItMatters: z.string().describe("The engineering principle and concrete consequence"),
+});
+export type ProposalExplanation = z.infer<typeof ProposalExplanationSchema>;
+
+/**
  * The Change Proposal — the atomic unit of transformation. Agents don't "edit
  * code"; they operate on these. Everything the firewall, engineer, verifiers,
  * ledger and report read is declared here up front.
@@ -51,6 +63,9 @@ export const ChangeProposalSchema = z.object({
   /** priority = impact ÷ risk; higher = earlier in the backlog. */
   priority: z.number(),
   allowedInModes: z.array(RefactoringModeSchema).min(1),
+  explanation: ProposalExplanationSchema.optional(),
+  /** Mermaid diagram contrasting before/after, when a picture earns its place. */
+  beforeAfterDiagram: z.string().optional(),
 });
 export type ChangeProposal = z.infer<typeof ChangeProposalSchema>;
 

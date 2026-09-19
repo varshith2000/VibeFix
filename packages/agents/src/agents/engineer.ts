@@ -76,10 +76,21 @@ export class RefactoringEngineer implements VibeFixAgent {
         }
         const result = await ctx.llm.complete({
           system:
-            "You are the Refactoring Engineer in VibeFix. Prime directive: BEHAVIOR PRESERVATION.\n" +
-            "Rules: implement EXACTLY the stated proposal; move/extract/rename, NEVER rewrite logic; " +
-            "smallest possible diff; touch ONLY the listed files; no drive-by edits; no dependency changes; " +
-            "no public API changes. Return full new content for each file you modify.",
+            "You are the Refactoring Engineer in VibeFix, an automated behavior-preserving refactoring system.\n" +
+            "PRIME DIRECTIVE: the program's observable behavior must not change. You are moving structure, never logic.\n\n" +
+            "WORK RULES:\n" +
+            "1. Implement EXACTLY the stated proposal — nothing else, no drive-by edits, no reformatting of untouched code.\n" +
+            "2. Move / extract / rename / delete-dead-code. NEVER rewrite business logic, change control flow, alter " +
+            "error semantics, reorder side effects, or change what functions return.\n" +
+            "3. Preserve every public interface: same exported names, signatures, routes, response shapes. " +
+            "Call sites keep working unchanged.\n" +
+            "4. When extracting: the extracted unit keeps the ORIGINAL code verbatim as its body; the original site " +
+            "becomes a call/delegation to it.\n" +
+            "5. When deduplicating: choose the most complete copy as the shared implementation; others become calls.\n" +
+            "6. Smallest diff that honestly achieves the proposal's stated goal.\n" +
+            "7. Touch ONLY paths that appear in filesInScope. New files ARE allowed if they are inside a scoped directory.\n" +
+            "8. No dependency changes, no config changes, no schema changes, no comment-only changes.\n\n" +
+            "OUTPUT: full new content for every file you modify or create (files you don't touch must NOT appear).",
           messages: [
             {
               role: "user",
@@ -93,8 +104,15 @@ export class RefactoringEngineer implements VibeFixAgent {
                     filesInScope: proposal.filesInScope,
                     constraints: proposal.constraints,
                     expectedBenefit: proposal.expectedBenefit,
+                    ...(proposal.explanation
+                      ? {
+                          currentState: proposal.explanation.currentState,
+                          proposedState: proposal.explanation.proposedState,
+                        }
+                      : {}),
                   },
                   mode: ctx.runState.mode,
+                  forbiddenZones: ctx.forbiddenZones ?? [],
                   files: fileContents,
                 },
                 null,
@@ -103,31 +121,27 @@ export class RefactoringEngineer implements VibeFixAgent {
             },
           ],
           responseSchema: EditsSchema,
-          maxTokens: 8_192,
+          maxTokens: 16_384,
           temperature: 0,
           metadata: { agentId: ctx.def.agentId, step: "implement" },
         });
         const plan = result.structured;
         if (!plan) throw new Error("model returned no structured edits");
+        if (plan.edits.length === 0) {
+          return rejected("model proposed no edits — nothing to implement");
+        }
         rationale = plan.rationale;
         await ctx.progress(`applying ${plan.edits.length} edits`);
         for (const edit of plan.edits) {
           await write(edit.path.replace(/\\/g, "/"), edit.newContent);
         }
       } else {
-        // Mock/demo mode: a labeled, harmless boundary marker inside scope.
-        const target = inScope[0];
-        if (!target) throw new Error("no in-scope code file to touch");
-        rationale = `demo mode: appended a boundary marker comment to ${target.path} (no LLM provider configured)`;
-        await ctx.progress("demo edit: boundary marker");
-        let content = "";
-        try {
-          content = await fs.readFile(path.join(worktree.path, ...target.path.split("/")), "utf8");
-        } catch {
-          content = "";
-        }
-        const marker = `\n// vibefix(${proposal.proposalId}): boundary reviewed by VibeFix (demo edit)\n`;
-        await write(target.path, `${content}${marker}`);
+        // Real models only: without an LLM the engineer REFUSES to touch code.
+        // Deterministic analysis upstream is fine — fake modifications are not.
+        return rejected(
+          "no text model is routed to the engineer — VibeFix refuses to make placeholder modifications. " +
+            "Route a real model (Gemini, Anthropic, OpenAI or Ollama) in ⚙ Settings and retry.",
+        );
       }
 
       const attempt: ChangeAttemptArtifact = {

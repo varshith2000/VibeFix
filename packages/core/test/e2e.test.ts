@@ -1,29 +1,104 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { RunManager } from "../src/index.js";
-import { vibefixExecutorFactory } from "@vibefix/agents";
+import { RunManager, runPaths, type RunServices } from "../src/index.js";
+import { VibefixExecutor } from "@vibefix/agents";
 import { createFixtureRepo } from "@vibefix/fixture-repo";
 
 const dirs: string[] = [];
 
+beforeAll(() => {
+  // Keep the central VibeFix workspace inside the test sandbox — never the
+  // developer's real ~/.vibefix.
+  const home = mkdtempSync(path.join(tmpdir(), "vibefix-home-"));
+  dirs.push(home);
+  process.env.VIBEFIX_HOME = home;
+});
+
 afterAll(async () => {
+  delete process.env.VIBEFIX_HOME;
   await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }).catch(() => undefined)));
 });
 
 /**
- * Full end-to-end over a fixture repo with mock providers (zero keys, zero
- * cost): recon pools -> diagnosis -> risk -> synthesis -> checkpoint (auto
- * approve) -> harness -> execution (worktree loop) -> report -> completed.
+ * The PRODUCT is real-models-only (no mock providers in the default routing;
+ * the engineer refuses to run without a real model). This suite therefore
+ * builds an explicit TEST routing with scripted mock doubles — deterministic,
+ * zero keys, zero cost — to exercise the full orchestrator loop.
  */
-describe("VibeFix end-to-end (mock providers)", () => {
+async function testExecutorFactory(repoPath: string) {
+  // Script a real-looking dedup edit for the engineer so the worktree ->
+  // verify -> commit -> cherry-pick loop has actual content to land.
+  // Deliberately adds NO new exports: the public-API gate must see a pure
+  // internal refactor, exactly as it would demand from a real model.
+  const original = await readFile(path.join(repoPath, "src", "index.js"), "utf8");
+  const deduped =
+    `${original}\n// vibefix test: shared formatting extracted (deduplicated)\n` +
+    `function _formatUserLine(u) { return u.name.charAt(0).toUpperCase() + u.name.slice(1) + ' <' + u.email + '>'; }\n`;
+  return (services: RunServices) =>
+    new VibefixExecutor(services, process.env).registerMockScript("engineer", {
+      rationale: "test double: extract the duplicated formatting into one shared helper",
+      edits: [{ path: "src/index.js", newContent: deduped }],
+    });
+}
+
+const TEST_CONFIG = {
+  routing: {
+    providers: [
+      {
+        providerId: "mock-text",
+        kind: "TextGeneration",
+        adapter: "mock-text",
+        defaultModel: "mock-coder",
+        contextWindowTokens: 128_000,
+        maxOutputTokens: 8_192,
+        enabled: true,
+      },
+      {
+        providerId: "mock-decision",
+        kind: "TypedDecision",
+        adapter: "mock-decision",
+        defaultModel: "mock-judge",
+        contextWindowTokens: 32_000,
+        maxOutputTokens: 2_048,
+        enabled: true,
+      },
+    ],
+    routes: {
+      cartographer: { providerId: "mock-text" },
+      "test-surveyor": { providerId: "mock-text" },
+      "smell-detector": { providerId: "mock-text" },
+      "arch-auditor": { providerId: "mock-text" },
+      "risk-assessor": { providerId: "mock-decision" },
+      synthesis: { providerId: "mock-decision" },
+      "harness-builder": { providerId: "mock-text" },
+      engineer: { providerId: "mock-text" },
+      verifier: { providerId: "mock-decision" },
+      docent: { providerId: "mock-text" },
+    },
+    budgets: { runMaxTokens: 4_000_000, maxChangesPerRun: 10, maxRetriesPerChange: 2, warnFraction: 0.8 },
+  },
+  defaultMode: "minimal",
+  protectedPaths: [],
+  analyzer: { sidecarProtocolVersion: 1 },
+} as const;
+
+/**
+ * Full end-to-end over a fixture repo with scripted test doubles (zero keys,
+ * zero cost): recon pools -> diagnosis -> risk -> synthesis -> checkpoint
+ * (auto approve) -> harness -> execution (worktree loop) -> report -> completed.
+ */
+describe("VibeFix end-to-end (scripted test doubles)", () => {
   it("completes a full run against the small-mess fixture", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "vibefix-e2e-"));
     dirs.push(dir);
     const repoPath = await createFixtureRepo(dir, { profile: "small-mess" });
 
-    const manager = await RunManager.open(repoPath, vibefixExecutorFactory(process.env));
+    const manager = await RunManager.open(repoPath, await testExecutorFactory(repoPath), {
+      config: TEST_CONFIG as never,
+    });
     const { runtime } = await manager.createRun("minimal");
 
     let approved = false;
@@ -67,11 +142,11 @@ describe("VibeFix end-to-end (mock providers)", () => {
     expect(proposals.length).toBeGreaterThan(0);
 
     // Ledger + report exist on disk
-    const ledgerPath = path.join(repoPath, ".vibefix", "runs", runtime.runId, "ledger.json");
+    const ledgerPath = runPaths(repoPath, runtime.runId).ledgerFile;
     const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { entries: unknown[] };
     expect(ledger.entries.length).toBeGreaterThan(0);
 
-    const reportPath = path.join(repoPath, ".vibefix", "runs", runtime.runId, "report.md");
+    const reportPath = runPaths(repoPath, runtime.runId).reportFile;
     const report = await readFile(reportPath, "utf8");
     expect(report).toContain("What did NOT change");
 
@@ -85,13 +160,15 @@ describe("VibeFix end-to-end (mock providers)", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "vibefix-clean-"));
     dirs.push(dir);
     const repoPath = await createFixtureRepo(dir, { profile: "small-mess" });
-    const manager = await RunManager.open(repoPath, vibefixExecutorFactory(process.env));
+    const manager = await RunManager.open(repoPath, await testExecutorFactory(repoPath), {
+      config: TEST_CONFIG as never,
+    });
     const { runtime } = await manager.createRun("minimal");
     await runtime.dispatch({ type: "START" });
     const state = runtime.snapshot();
-    const worktreesDir = path.join(repoPath, ".vibefix", "worktrees");
+    const wtDir = runPaths(repoPath, "x").worktreesDir;
     const leftovers = await import("node:fs").then((fs) =>
-      fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir) : [],
+      fs.existsSync(wtDir) ? fs.readdirSync(wtDir) : [],
     );
     expect(state.status).toMatch(/completed|awaitingApproval|aborted/);
     expect(leftovers.length).toBe(0);

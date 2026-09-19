@@ -26,10 +26,17 @@ pnpm dev:server          # http://127.0.0.1:8630
 pnpm dev:ui              # http://localhost:5173
 ```
 
+**Where things live:** run state, worktrees, cloned GitHub repos and per-project config
+all live in a central workspace — `~/.vibefix` (override with the
+`VIBEFIX_HOME` env var). Your project folder is never used for run data; VibeFix only ever
+reads it, and writes only through firewalled worktrees you approved. API keys go in `.env`
+at the VibeFix root (gitignored, auto-loaded).
+
 Open http://localhost:5173, point it at any git repository (clean working tree),
-pick a mode, and watch the agent graph run. Out of the box everything uses
-deterministic **mock providers** — no keys, no cost — so you can explore the whole
-loop (including the checkpoint and a demo change) safely.
+pick a mode, and watch the agent graph run. Add your API keys to `.env` first —
+VibeFix is **real-models-only**: analysis runs deterministically without keys,
+but the engineer refuses to touch code until a real model (Gemini, Anthropic,
+OpenAI or local Ollama) is routed in ⚙ Settings. Nothing is ever faked.
 
 A demo fixture was generated during development at `D:\tmp-vibefix-demo` — or make a fresh one:
 
@@ -61,8 +68,10 @@ node packages/cli/dist/main.js run <repoPath> --mode minimal --yes
 | 10 | Docent | Text | The report: what changed, what did NOT change, what you learn |
 
 **Decision agents are TypedDecision calls** (structured choice/score answers, no prose) —
-routed by default to Jev by TypeSafe AI when keys exist, with OpenRouter and a
-deterministic mock as fallbacks. Generative agents route to Anthropic / OpenAI / Ollama.
+routed to Jev by TypeSafe AI, with OpenRouter as fallback. Generative agents route to
+Gemini / Anthropic / OpenAI / Ollama. There are no mock providers in the product:
+unavailable providers degrade to deterministic analysis, and the engineer refuses
+rather than making placeholder edits.
 
 ## Orchestration guarantees
 
@@ -90,7 +99,7 @@ Route any agent to any provider per-agent under `routes`.
 ```
 packages/
   schemas/    zod contracts for every artifact (RunState, Finding, ChangeProposal, ...)
-  llm/        TextGeneration + TypedDecision interfaces; anthropic/openai/ollama/jev/openrouter/mock adapters
+  llm/        TextGeneration + TypedDecision interfaces; anthropic/openai/gemini/ollama/jev/openrouter adapters
   adapters/   deterministic tools: fs facts, language detect, import graph, git, test runner, metrics; Python sidecar seam
   core/       orchestrator reducer + runtime, evidence store, event log, budget, worktrees, firewall
   agents/     the 10 agents + executor implementing core's port

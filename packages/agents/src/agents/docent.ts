@@ -11,6 +11,8 @@ import {
 import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
 import { enrich } from "../runtime/text-agent-loop.js";
+import { architectureMermaid, existingArchitectureNarrative } from "../shared/explain.js";
+import { runPaths } from "@vibefix/core";
 import { z } from "zod";
 
 /**
@@ -45,11 +47,14 @@ export class Docent implements VibeFixAgent {
         }
       }
 
-      const graphSummary = graph ? KnowledgeGraphSchema.parse(graph).summary : null;
+      const graphParsed = graph ? KnowledgeGraphSchema.safeParse(graph) : null;
+      const graphData = graphParsed?.success ? graphParsed.data : null;
+      const graphSummary = graphData?.summary ?? null;
       const surveyData = survey ? TestSurveyArtifactSchema.parse(survey) : null;
       const backlogData = backlog ? BacklogArtifactSchema.parse(backlog) : null;
 
-      const ledgerPath = path.join(ctx.repoPath, ".vibefix", "runs", ctx.runState.runId, "ledger.json");
+      const paths = runPaths(ctx.repoPath, ctx.runState.runId);
+      const ledgerPath = paths.ledgerFile;
       const ledger = await fs.readFile(ledgerPath, "utf8").then(JSON.parse).catch(() => ({ entries: [] })) as {
         entries: Array<{ proposalId: string; verdict: string; committedRef: string | null }>;
       };
@@ -70,6 +75,8 @@ export class Docent implements VibeFixAgent {
 
       const deterministic: ReportArtifact = {
         stateOfCodebase: this.stateNarrative(graphSummary, surveyData, findingsCount),
+        existingArchitecture: graphData ? existingArchitectureNarrative(graphData) : undefined,
+        existingArchitectureDiagram: graphData ? architectureMermaid(graphData) : undefined,
         changeExplainers: (backlogData?.proposals ?? []).slice(0, 50).map((p) => {
           const verdict = verdicts.find((v) => v.proposalId === p.proposalId);
           // Titles are minted as "<category>: <finding title>" by Synthesis.
@@ -85,6 +92,14 @@ export class Docent implements VibeFixAgent {
               ...p.filesOutOfScope,
               verdict?.gates.some((g) => g.result === "FAIL") ? "nothing landed (gate failure)" : "no unrelated files",
             ],
+            ...(p.explanation
+              ? {
+                  currentState: p.explanation.currentState,
+                  proposedState: p.explanation.proposedState,
+                  whyItMatters: p.explanation.whyItMatters,
+                }
+              : {}),
+            ...(p.beforeAfterDiagram ? { beforeAfterDiagram: p.beforeAfterDiagram } : {}),
           };
         }),
         whatDidNotChange: [
@@ -106,16 +121,22 @@ export class Docent implements VibeFixAgent {
       const polished = await enrich(ctx, {
         system:
           "You are the Docent. Rewrite the report narrative sections for a developer who wants to LEARN " +
-          "what happened to their codebase. Keep all IDs and numbers exactly as given.",
-        prompt: JSON.stringify(deterministic),
+          "what happened to their codebase. Ground every claim in the given facts; keep IDs and numbers exactly as given.",
+        prompt: JSON.stringify({
+          stateOfCodebase: deterministic.stateOfCodebase,
+          existingArchitecture: deterministic.existingArchitecture,
+          learningSummary: deterministic.learningSummary,
+        }),
         schema: z.object({
           stateOfCodebase: z.string(),
+          existingArchitecture: z.string().optional(),
           learningSummary: z.string(),
         }),
-        maxTokens: 2_048,
+        maxTokens: 2_500,
       });
       if (polished) {
         deterministic.stateOfCodebase = polished.stateOfCodebase;
+        if (polished.existingArchitecture) deterministic.existingArchitecture = polished.existingArchitecture;
         deterministic.learningSummary = polished.learningSummary;
       }
 
@@ -128,7 +149,7 @@ export class Docent implements VibeFixAgent {
       });
       // report.md twin for easy reading / future UI rendering.
       const reportMd = renderMarkdown(deterministic);
-      const mdPath = path.join(ctx.repoPath, ".vibefix", "runs", ctx.runState.runId, "report.md");
+      const mdPath = paths.reportFile;
       await fs.mkdir(path.dirname(mdPath), { recursive: true }).catch(() => undefined);
       await fs.writeFile(mdPath, reportMd, "utf8").catch(() => undefined);
 
@@ -164,11 +185,23 @@ function renderMarkdown(report: ReportArtifact): string {
     `## State of your codebase`,
     report.stateOfCodebase,
     ``,
+  ];
+  if (report.existingArchitecture) {
+    lines.push(`## Your architecture today`, report.existingArchitecture, ``);
+  }
+  if (report.existingArchitectureDiagram) {
+    lines.push("```mermaid", report.existingArchitectureDiagram, "```", ``);
+  }
+  lines.push(
     `## Changes (${report.totals.changesCommitted} committed / ${report.totals.changesProposed} proposed)`,
-    ...report.changeExplainers.map(
-      (c) => `- **${c.proposalId}: ${c.what}** — ${c.why} (${c.principle})`,
-    ),
-    ``,
+    ...report.changeExplainers.flatMap((c) => {
+      const block = [`### ${c.proposalId}: ${c.what}`, `**Why:** ${c.why} (${c.principle})`];
+      if (c.currentState) block.push(``, `**Today:** ${c.currentState}`);
+      if (c.proposedState) block.push(`**After this change:** ${c.proposedState}`);
+      if (c.whyItMatters) block.push(`**Why it matters:** ${c.whyItMatters}`);
+      if (c.beforeAfterDiagram) block.push(``, "```mermaid", c.beforeAfterDiagram, "```");
+      return [...block, ``];
+    }),
     `## What did NOT change`,
     ...report.whatDidNotChange.map((w) => `- ${w}`),
     ``,
@@ -182,6 +215,6 @@ function renderMarkdown(report: ReportArtifact): string {
     `- Deferred: ${report.totals.changesDeferred}`,
     `- Public API changes: ${report.totals.publicApiChanges}`,
     `- Tokens spent: ${report.totals.tokensSpent}`,
-  ];
+  );
   return lines.join("\n");
 }

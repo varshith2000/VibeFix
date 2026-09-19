@@ -57,25 +57,24 @@ export const ModelRoutingSchema = z.object({
 });
 export type ModelRouting = z.infer<typeof ModelRoutingSchema>;
 
-/** A full default routing usable out of the box (mock providers, zero keys). */
+/**
+ * Real-models-only default routing. No mock providers: agents without a key
+ * degrade to deterministic analysis, and the engineer REFUSES to run rather
+ * than make placeholder edits. Providers are enabled by default; actual
+ * availability is gated by the presence of their API key in the environment.
+ */
 export const DEFAULT_MODEL_ROUTING: ModelRouting = {
   providers: [
     {
-      providerId: "mock-text",
+      providerId: "gemini",
       kind: "TextGeneration",
-      adapter: "mock-text",
-      defaultModel: "mock-coder",
-      contextWindowTokens: 128_000,
-      maxOutputTokens: 8_192,
-      enabled: true,
-    },
-    {
-      providerId: "mock-decision",
-      kind: "TypedDecision",
-      adapter: "mock-decision",
-      defaultModel: "mock-judge",
-      contextWindowTokens: 32_000,
-      maxOutputTokens: 2_048,
+      adapter: "gemini",
+      apiKeyEnv: "GEMINI_API_KEY",
+      defaultModel: "gemini-3.5-flash",
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 65_536,
+      pricePerMTokInput: 0.3,
+      pricePerMTokOutput: 2.5,
       enabled: true,
     },
     {
@@ -101,18 +100,6 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       enabled: false,
     },
     {
-      providerId: "gemini",
-      kind: "TextGeneration",
-      adapter: "gemini",
-      apiKeyEnv: "GEMINI_API_KEY",
-      defaultModel: "gemini-2.5-flash",
-      contextWindowTokens: 1_000_000,
-      maxOutputTokens: 65_536,
-      pricePerMTokInput: 0.3,
-      pricePerMTokOutput: 2.5,
-      enabled: false,
-    },
-    {
       providerId: "ollama",
       kind: "TextGeneration",
       adapter: "ollama",
@@ -123,16 +110,6 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       enabled: false,
     },
     {
-      providerId: "jev",
-      kind: "TypedDecision",
-      adapter: "jev",
-      apiKeyEnv: "TYPESAFE_API_KEY",
-      defaultModel: "jev-latest",
-      contextWindowTokens: 32_000,
-      maxOutputTokens: 2_048,
-      enabled: false,
-    },
-    {
       providerId: "openrouter",
       kind: "TypedDecision",
       adapter: "openrouter",
@@ -140,20 +117,30 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       defaultModel: "typesafe/jev-latest",
       contextWindowTokens: 32_000,
       maxOutputTokens: 2_048,
-      enabled: false,
+      enabled: true,
+    },
+    {
+      providerId: "jev",
+      kind: "TypedDecision",
+      adapter: "jev",
+      apiKeyEnv: "TYPESAFE_API_KEY",
+      defaultModel: "jev-latest",
+      contextWindowTokens: 32_000,
+      maxOutputTokens: 2_048,
+      enabled: true,
     },
   ],
   routes: {
-    cartographer: { providerId: "mock-text" },
-    "test-surveyor": { providerId: "mock-text" },
-    "smell-detector": { providerId: "mock-text" },
-    "arch-auditor": { providerId: "mock-text" },
-    "risk-assessor": { providerId: "mock-decision", fallbackProviderId: "mock-decision" },
-    synthesis: { providerId: "mock-decision", fallbackProviderId: "mock-decision" },
-    "harness-builder": { providerId: "mock-text" },
-    engineer: { providerId: "mock-text" },
-    verifier: { providerId: "mock-decision", fallbackProviderId: "mock-decision" },
-    docent: { providerId: "mock-text" },
+    cartographer: { providerId: "gemini", fallbackProviderId: "anthropic" },
+    "test-surveyor": { providerId: "gemini", fallbackProviderId: "anthropic" },
+    "smell-detector": { providerId: "gemini", fallbackProviderId: "anthropic" },
+    "arch-auditor": { providerId: "gemini", fallbackProviderId: "anthropic" },
+    "risk-assessor": { providerId: "openrouter", fallbackProviderId: "jev" },
+    synthesis: { providerId: "openrouter", fallbackProviderId: "jev" },
+    "harness-builder": { providerId: "gemini", fallbackProviderId: "anthropic" },
+    engineer: { providerId: "gemini", fallbackProviderId: "anthropic" },
+    verifier: { providerId: "openrouter", fallbackProviderId: "jev" },
+    docent: { providerId: "gemini", fallbackProviderId: "anthropic" },
   },
   budgets: {
     runMaxTokens: 4_000_000,

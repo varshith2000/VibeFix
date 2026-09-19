@@ -69,4 +69,39 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(config),
     }).then(json<{ ok: boolean }>),
+
+  cloneGitHub: (url: string, token?: string) =>
+    fetch("/api/projects/clone", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url, token: token || undefined }),
+    }).then(json<{ repoPath: string; name: string }>),
+
+  browseFs: (dir?: string) =>
+    fetch(`/api/fs/browse${dir ? `?path=${encodeURIComponent(dir)}` : ""}`).then(
+      json<{ path: string; parent: string | null; dirs: string[]; error?: string }>,
+    ),
+
+  tree: (repoPath: string) =>
+    fetch(`/api/projects/${encPath(repoPath)}/tree`).then(
+      json<{
+        files: Array<{ path: string; language: string | null; loc: number }>;
+        summary: { languages: Array<{ language: string; loc: number; fileCount: number }>; frameworks: string[]; totalLoc: number; entrypoints: string[] };
+      }>,
+    ),
+
+  file: (repoPath: string, path: string) =>
+    fetch(`/api/projects/${encPath(repoPath)}/file?path=${encodeURIComponent(path)}`).then(
+      json<{ path: string; content: string; truncated: boolean }>,
+    ),
+
+  usage: (runId: string) =>
+    fetch(`/api/runs/${runId}/usage`).then(
+      json<{ total: number; byAgent: Record<string, number>; byProvider: Record<string, number> }>,
+    ),
+
+  openRun: (repoPath: string, runId: string) =>
+    fetch(`/api/projects/${encPath(repoPath)}/runs/${runId}/open`, { method: "POST" }).then(
+      json<{ runId: string }>,
+    ),
 };

@@ -11,6 +11,7 @@ import {
 import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
 import { decide } from "../runtime/decision-agent.js";
+import { categoryExplanation, beforeAfterMermaid } from "../shared/explain.js";
 
 const SCOPE_TEMPLATES: Record<string, (f: Finding) => string[]> = {
   "extract-function": (f) => [fileOf(f)],
@@ -85,6 +86,8 @@ export class Synthesis implements VibeFixAgent {
         }
         const scopeTemplate = SCOPE_TEMPLATES[f.recommendedChangeCategory] ?? SCOPE_TEMPLATES["none"]!;
         const scope = unique(scopeTemplate(f)).filter((s) => s.length > 0);
+        const explanation = categoryExplanation(f);
+        const diagram = beforeAfterMermaid(f, scope.length > 0 ? scope : [fileOf(f)]);
         const constraints: Constraint[] = ["no-public-api-change", "no-dependency-changes", "no-behavior-change"];
         const modes: RefactoringMode[] =
           risk.band === "high"
@@ -108,6 +111,8 @@ export class Synthesis implements VibeFixAgent {
           approvalStatus: "pending",
           priority: 0,
           allowedInModes: modes,
+          explanation,
+          ...(diagram ? { beforeAfterDiagram: diagram } : {}),
         });
         f.proposedChangeId = `RFC-${String(i + 1).padStart(3, "0")}`;
       });

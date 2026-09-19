@@ -10,7 +10,7 @@ export type { RunServices, ExecutorFactory } from "./orchestrator/run-manager.js
 // Store
 export { EvidenceStore, atomicWrite, type EvidenceReader, type EvidenceWriter } from "./store/evidence-store.js";
 export { EventLog } from "./store/event-log.js";
-export { runPaths, runsDir, configPath, type RunPaths } from "./store/paths.js";
+export { runPaths, runsDir, configPath, worktreesDir, vibefixHome, projectDir, projectKey, clonesDir, type RunPaths } from "./store/paths.js";
 
 // Safety layer
 export { WorktreeManager, type WorktreeHandle } from "./worktree/worktree-manager.js";

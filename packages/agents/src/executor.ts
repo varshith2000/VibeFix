@@ -83,14 +83,23 @@ export class VibefixExecutor implements AgentExecutorPort {
     agents?: Map<string, VibeFixAgent>,
   ) {
     this.agents = agents ?? buildAgents();
-    this.router = new LlmRouter(services.config.routing, env, (agentId, _providerId, usage) => {
-      services.meter.record(usage.totalTokens);
-      void agentId;
+    this.router = new LlmRouter(services.config.routing, env, (agentId, providerId, usage) => {
+      services.meter.record(usage.totalTokens, agentId, providerId);
     });
   }
 
   definitions(): AgentDefinition[] {
     return AGENT_DEFINITIONS;
+  }
+
+  /**
+   * Test-only hook: script the mock text provider for one agent. The product
+   * never routes mocks (real-models-only defaults); tests use this to keep
+   * the orchestrator suite deterministic and free.
+   */
+  registerMockScript(agentId: string, payload: unknown): this {
+    this.router.mocks.mockText.when(agentId, payload);
+    return this;
   }
 
   async execute(definition: AgentDefinition, input: AgentExecutionInput): Promise<AgentOutcomeCore> {

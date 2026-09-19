@@ -5,29 +5,37 @@ interface RunStore {
   runId: string | null;
   runState: RunState | null;
   events: RunEvent[];
+  usage: { total: number; byAgent: Record<string, number>; byProvider: Record<string, number> };
   ws: WebSocket | null;
   connect(runId: string): void;
   disconnect(): void;
   applySnapshot(state: RunState): void;
+  applyUsage(usage: RunStore["usage"]): void;
   pushEvent(event: RunEvent): void;
 }
+
+const EMPTY_USAGE = { total: 0, byAgent: {}, byProvider: {} };
 
 export const useRunStore = create<RunStore>((set, get) => ({
   runId: null,
   runState: null,
   events: [],
+  usage: EMPTY_USAGE,
   ws: null,
 
   connect(runId: string) {
     get().disconnect();
+    set({ usage: EMPTY_USAGE });
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/ws?runId=${runId}`);
     ws.onmessage = (msg) => {
       try {
         const frame = JSON.parse(msg.data as string) as
           | { t: "snapshot"; state: RunState }
+          | { t: "usage"; usage: RunStore["usage"] }
           | { t: "event"; event: RunEvent; seq: number };
         if (frame.t === "snapshot") get().applySnapshot(frame.state);
+        else if (frame.t === "usage") get().applyUsage(frame.usage);
         else get().pushEvent(frame.event);
       } catch {
         // ignore malformed frame
@@ -56,6 +64,10 @@ export const useRunStore = create<RunStore>((set, get) => ({
 
   applySnapshot(state) {
     set({ runState: state });
+  },
+
+  applyUsage(usage) {
+    set({ usage });
   },
 
   pushEvent(event) {
