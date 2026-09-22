@@ -105,7 +105,16 @@ export const ChangeAttemptArtifactSchema = z.object({
 export type ChangeAttemptArtifact = z.infer<typeof ChangeAttemptArtifactSchema>;
 
 export const GateResultSchema = z.object({
-  gate: z.enum(["firewall-scope", "characterization-suite", "regression-suite", "public-api-surface"]),
+  gate: z.enum([
+    "firewall-scope",
+    "characterization-suite",
+    "regression-suite",
+    "public-api-surface",
+    "typecheck",
+    "lint",
+    "build",
+    "principle-compliance",
+  ]),
   result: z.enum(["PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"]),
   details: z.string(),
 });

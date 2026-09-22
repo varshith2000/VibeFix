@@ -21,6 +21,7 @@ const PHASE_ORDER = [
   "diagnosis",
   "riskAssessment",
   "synthesis",
+  "minimality",
   "awaitingApproval",
   "harness",
   "execution",
@@ -33,11 +34,12 @@ const PHASE_LABEL: Record<string, string> = {
   diagnosis: "2 · Diagnose",
   riskAssessment: "3 · Assess risk",
   synthesis: "4 · Backlog",
-  awaitingApproval: "5 · Your approval",
-  harness: "6 · Safety net",
-  execution: "7 · Transform",
-  verification: "8 · Verify",
-  report: "9 · Explain",
+  minimality: "5 · Minimality",
+  awaitingApproval: "6 · Your approval",
+  harness: "7 · Safety net",
+  execution: "8 · Transform",
+  verification: "9 · Verify",
+  report: "10 · Explain",
 };
 
 const STATUS_STYLE: Record<AgentRunStatus, { border: string; dot: string; label: string }> = {

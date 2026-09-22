@@ -5,8 +5,11 @@ import type { WebSocket } from "ws";
 import {
   BacklogArtifactSchema,
   FindingsArtifactSchema,
+  KnowledgeGraphSchema,
+  ProductIntentSchema,
   RepoConfigSchema,
   ReportArtifactSchema,
+  TestSurveyArtifactSchema,
   type AgentExecutionEvent,
   type ChangeLedgerEntry,
   type RefactoringMode,
@@ -332,6 +335,18 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
     },
   );
 
+  app.post("/api/runs/:runId/reject", async (req, reply) => {
+    const { runId } = req.params as { runId: string };
+    const runtime = getRuntime(runId);
+    if (!runtime) return reply.code(404).send({ error: "unknown run" });
+    const state = runtime.snapshot();
+    if (state.phase !== "awaitingApproval") {
+      return reply.code(409).send({ error: `run is in phase '${state.phase}', not awaitingApproval` });
+    }
+    registry.track(runId, runtime.dispatch({ type: "CHECKPOINT_REJECTED" }));
+    return { ok: true };
+  });
+
   app.post("/api/runs/:runId/abort", async (req, reply) => {
     const { runId } = req.params as { runId: string };
     const runtime = getRuntime(runId);
@@ -362,6 +377,60 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
       }
     }
     return { findings };
+  });
+
+  app.get("/api/runs/:runId/intelligence", async (req, reply) => {
+    const { runId } = req.params as { runId: string };
+    const entry = registry.runtime(runId);
+    const store = entry?.runtime.store ?? (await diskEvidence(runId));
+    if (!store) return reply.code(404).send({ error: "unknown run" });
+
+    const graphArt = await store.latest("knowledge-graph");
+    const intentArt = await store.latest("product-intent");
+    const surveyArt = await store.latest("test-survey");
+    const findings: Array<{ category: string; risk: { band: string; value: number } }> = [];
+    for (const artifact of await store.list(undefined, "findings")) {
+      try {
+        findings.push(...FindingsArtifactSchema.parse(artifact.data).findings);
+      } catch {
+        // skip
+      }
+    }
+
+    const byCat: Record<string, number> = {};
+    const byBand: Record<string, number> = { low: 0, medium: 0, high: 0, forbidden: 0 };
+    for (const f of findings) {
+      byCat[f.category] = (byCat[f.category] ?? 0) + 1;
+      byBand[f.risk.band] = (byBand[f.risk.band] ?? 0) + 1;
+    }
+
+    // Health scores: 100 minus weighted pressure from findings (Idea §28).
+    const pressure = (byBand.forbidden ?? 0) * 12 + (byBand.high ?? 0) * 6 + (byBand.medium ?? 0) * 2 + (byBand.low ?? 0);
+    const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
+    const survey = surveyArt ? TestSurveyArtifactSchema.safeParse(surveyArt.data) : null;
+    const testingScore = survey?.success
+      ? clamp(
+          (survey.data.canTest ? 40 : 0) +
+            (survey.data.testFileCount > 0 ? 30 : 0) +
+            Math.min(30, survey.data.testFileCount * 3) -
+            (survey.data.untestedPaths.length > 5 ? 15 : 0),
+        )
+      : 40;
+
+    return {
+      graph: graphArt ? KnowledgeGraphSchema.safeParse(graphArt.data).data ?? null : null,
+      intent: intentArt ? ProductIntentSchema.safeParse(intentArt.data).data ?? null : null,
+      survey: survey?.success ? survey.data : null,
+      findingCounts: { total: findings.length, byCategory: byCat, byBand },
+      health: {
+        architecture: clamp(100 - (byCat.architecture ?? 0) * 8 - pressure * 0.3),
+        maintainability: clamp(100 - (byCat.smell ?? 0) * 5 - (byCat.consistency ?? 0) * 6),
+        testing: testingScore,
+        security: clamp(100 - (byCat.security ?? 0) * 15),
+        dependencyHygiene: clamp(100 - (byCat.dependency ?? 0) * 10),
+        documentation: clamp(100 - (byCat.documentation ?? 0) * 8),
+      },
+    };
   });
 
   app.get("/api/runs/:runId/backlog", async (req, reply) => {

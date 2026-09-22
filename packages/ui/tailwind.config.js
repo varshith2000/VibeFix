@@ -5,11 +5,16 @@ export default {
     extend: {
       colors: {
         ink: {
-          950: "#0b0f17",
-          900: "#111827",
-          800: "#1f2937",
-          700: "#374151",
+          950: "#070b12",
+          900: "#0d1420",
+          800: "#151e2e",
+          700: "#243044",
         },
+      },
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ['"Syne"', '"IBM Plex Sans"', "sans-serif"],
+        mono: ['"JetBrains Mono"', "ui-monospace", "monospace"],
       },
     },
   },

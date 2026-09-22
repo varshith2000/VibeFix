@@ -29,11 +29,15 @@ export * from "./routing.js";
 export * from "./config.js";
 export * from "./survey.js";
 export * from "./report.js";
+export * from "./intent.js";
 export { ARTIFACT_SCHEMA_VERSION, migrateArtifact } from "./migrations.js";
+
+import { ProductIntentSchema } from "./intent.js";
 
 /** kind -> payload schema. The single registry that makes artifact I/O typed. */
 export const ARTIFACT_PAYLOAD_SCHEMAS: Record<ArtifactKind, z.ZodTypeAny> = {
   "knowledge-graph": KnowledgeGraphSchema,
+  "product-intent": ProductIntentSchema,
   "test-survey": TestSurveyArtifactSchema,
   findings: FindingsArtifactSchema,
   "risk-assessments": RiskAssessmentsArtifactSchema,

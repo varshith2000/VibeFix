@@ -28,7 +28,7 @@ function readPackageJson(root: string): Record<string, unknown> | null {
 
 /** Detects runnable install/build/test/typecheck commands from manifests. */
 export class NodeTestRunner implements TestRunner {
-  detectCommands(root: string): { install?: string; build?: string; test?: string; typecheck?: string } {
+  detectCommands(root: string): { install?: string; build?: string; test?: string; typecheck?: string; lint?: string } {
     const pkg = readPackageJson(root);
     if (!pkg) {
       if (existsSync(path.join(root, "pytest.ini")) || existsSync(path.join(root, "pyproject.toml"))) {
@@ -39,13 +39,14 @@ export class NodeTestRunner implements TestRunner {
     const scripts = (pkg.scripts ?? {}) as Record<string, string>;
     const pm = packageManagerFor(root);
     const runner = pm === "pnpm" ? "pnpm" : pm === "yarn" ? "yarn" : pm === "bun" ? "bun" : "npx";
-    const out: { install?: string; build?: string; test?: string; typecheck?: string } = {
+    const out: { install?: string; build?: string; test?: string; typecheck?: string; lint?: string } = {
       install: `${pm} install`,
     };
     if (typeof scripts.build === "string") out.build = `${runner} run build`;
     if (typeof scripts.test === "string") out.test = `${runner} run test`;
     if (typeof scripts.typecheck === "string") out.typecheck = `${runner} run typecheck`;
     else if (typeof scripts.tsc === "string") out.typecheck = `${runner} run tsc`;
+    if (typeof scripts.lint === "string") out.lint = `${runner} run lint`;
     return out;
   }
 

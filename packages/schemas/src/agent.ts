@@ -19,6 +19,7 @@ export const AgentPhaseSchema = z.enum([
   "diagnosis",
   "riskAssessment",
   "synthesis",
+  "minimality",
   "harness",
   "execution",
   "verification",
@@ -32,6 +33,7 @@ export type AgentPool = z.infer<typeof AgentPoolSchema>;
 
 export const ArtifactKindSchema = z.enum([
   "knowledge-graph",
+  "product-intent",
   "test-survey",
   "findings",
   "risk-assessments",

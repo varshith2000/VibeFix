@@ -172,6 +172,7 @@ export class RunManager {
         worktrees: new WorktreeManager(this.repoPath),
         meter,
         budgets,
+        protectedPaths: this.config.protectedPaths ?? [],
       },
       state,
     );
@@ -192,7 +193,15 @@ export async function loadRepoConfig(repoPath: string): Promise<RepoConfig> {
     if (routesToMock) {
       return { ...parsed, routing: structuredClone(DEFAULT_MODEL_ROUTING) };
     }
-    return parsed;
+    // Merge in any newly-added agent routes so upgrades don't leave agents unrouted.
+    return {
+      ...parsed,
+      routing: {
+        ...parsed.routing,
+        routes: { ...DEFAULT_MODEL_ROUTING.routes, ...parsed.routing.routes },
+        providers: parsed.routing.providers.length > 0 ? parsed.routing.providers : DEFAULT_MODEL_ROUTING.providers,
+      },
+    };
   } catch {
     // No config yet: real-models-only defaults, gated by API keys in the env.
     return RepoConfigSchema.parse({ routing: DEFAULT_MODEL_ROUTING });

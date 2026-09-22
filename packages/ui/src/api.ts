@@ -39,6 +39,9 @@ export const api = {
 
   findings: (runId: string) => fetch(`/api/runs/${runId}/findings`).then(json<{ findings: Finding[] }>),
 
+  intelligence: (runId: string) =>
+    fetch(`/api/runs/${runId}/intelligence`).then(json<import("./types").ProjectIntelligence>),
+
   backlog: (runId: string) =>
     fetch(`/api/runs/${runId}/backlog`).then(
       json<{ proposals: ChangeProposal[]; unaddressedFindings: Array<{ findingId: string; reason: string }> }>,
@@ -54,6 +57,9 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ mode, approvedProposalIds }),
     }).then(json<{ ok: boolean }>),
+
+  reject: (runId: string) =>
+    fetch(`/api/runs/${runId}/reject`, { method: "POST" }).then(json<{ ok: boolean }>),
 
   abort: (runId: string) =>
     fetch(`/api/runs/${runId}/abort`, { method: "POST" }).then(json<{ ok: boolean }>),

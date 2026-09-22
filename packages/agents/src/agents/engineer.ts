@@ -43,6 +43,7 @@ export class RefactoringEngineer implements VibeFixAgent {
       const inScope = codeFiles.filter((f) => /\.(ts|tsx|js|jsx|py)$/.test(f.path)).slice(0, 25);
 
       let rationale: string;
+      const filesTouched: string[] = [];
       const write = async (relativePath: string, newContent: string): Promise<boolean> => {
         const decision = firewall.canWrite(relativePath);
         if (!decision.allowed) {
@@ -65,6 +66,7 @@ export class RefactoringEngineer implements VibeFixAgent {
         const abs = path.join(worktree.path, ...relativePath.split("/"));
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, newContent, "utf8");
+        if (!filesTouched.includes(relativePath)) filesTouched.push(relativePath);
         return true;
       };
 
@@ -92,9 +94,20 @@ export class RefactoringEngineer implements VibeFixAgent {
           "5. When deduplicating: choose the most complete copy as the shared implementation; others become calls.\n" +
           "6. Smallest diff that honestly achieves the proposal's stated goal.\n" +
           "7. Touch ONLY paths that appear in filesInScope. New files ARE allowed if they are inside a scoped directory.\n" +
-          "8. No dependency changes, no config changes, no schema changes, no comment-only changes.\n\n" +
+          "8. No dependency changes, no config changes, no schema changes, no comment-only changes.\n" +
+          "9. Respect product intent constraints when provided — do not redesign the product.\n\n" +
           "OUTPUT: a single JSON object {\"rationale\": string, \"edits\": [{\"path\": string, \"newContent\": string}]} " +
           "with full new content for every file you modify or create (files you don't touch must NOT appear).";
+
+        const intentArtifact = await ctx.store.latest("product-intent");
+        let intentBlock: unknown = null;
+        if (intentArtifact) {
+          try {
+            intentBlock = intentArtifact.data;
+          } catch {
+            intentBlock = null;
+          }
+        }
 
         const planPrompt = JSON.stringify(
           {
@@ -113,6 +126,7 @@ export class RefactoringEngineer implements VibeFixAgent {
                   }
                 : {}),
             },
+            productIntent: intentBlock,
             mode: ctx.runState.mode,
             forbiddenZones: ctx.forbiddenZones ?? [],
             files: fileContents,
@@ -186,7 +200,7 @@ export class RefactoringEngineer implements VibeFixAgent {
         attempt: ctx.attempt ?? 0,
         worktreePath: worktree.path,
         rationale,
-        filesTouched: inScope.map((f) => f.path),
+        filesTouched,
       };
       const artifact = await ctx.store.write({
         kind: "change-attempt",

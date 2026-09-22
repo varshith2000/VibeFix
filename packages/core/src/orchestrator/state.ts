@@ -43,8 +43,10 @@ export type Effect =
   | { effect: "CleanupWorktrees" };
 
 export interface AgentRegistrySnapshot {
-  agentIdsByPool(pool: "recon" | "diagnosis"): string[];
-  agentIdByPhase(phase: "riskAssessment" | "synthesis" | "harness" | "report"): string | null;
+  agentIdsByPool(pool: "recon" | "diagnosis" | "verification"): string[];
+  agentIdByPhase(
+    phase: "riskAssessment" | "synthesis" | "minimality" | "harness" | "report",
+  ): string | null;
 }
 
 export function createInitialRunState(input: {

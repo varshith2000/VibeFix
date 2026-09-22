@@ -11,10 +11,16 @@ import { LlmRouter } from "@vibefix/llm";
 import type { AgentDefinition } from "@vibefix/schemas";
 import { ArchitectureAuditor } from "./agents/arch-auditor.js";
 import { Cartographer } from "./agents/cartographer.js";
+import { ConsistencySentinel } from "./agents/consistency-sentinel.js";
 import { Docent } from "./agents/docent.js";
 import { HarnessBuilder } from "./agents/harness-builder.js";
+import { Historian } from "./agents/historian.js";
 import { RefactoringEngineer } from "./agents/engineer.js";
+import { MinimalityAgent } from "./agents/minimality.js";
+import { PrincipleReviewer } from "./agents/principle-reviewer.js";
+import { RegressionSentinel } from "./agents/regression-sentinel.js";
 import { RiskAssessor } from "./agents/risk-assessor.js";
+import { SecurityAgent } from "./agents/security-agent.js";
 import { SmellDetector } from "./agents/smell-detector.js";
 import { Synthesis } from "./agents/synthesis.js";
 import { BehaviorVerifier } from "./agents/verifier.js";
@@ -22,18 +28,24 @@ import { TestSurveyor } from "./agents/test-surveyor.js";
 import type { AgentExecutionContext, AgentOutcomeCore, VibeFixAgent } from "./contract.js";
 import { AGENT_DEFINITIONS } from "./definitions.js";
 
-/** All 10 MVP agents, keyed by id. */
+/** All agents, keyed by id. */
 export function buildAgents(): Map<string, VibeFixAgent> {
   const agents: VibeFixAgent[] = [
     new Cartographer(),
+    new Historian(),
     new TestSurveyor(),
     new SmellDetector(),
     new ArchitectureAuditor(),
+    new ConsistencySentinel(),
+    new SecurityAgent(),
     new RiskAssessor(),
     new Synthesis(),
+    new MinimalityAgent(),
     new HarnessBuilder(),
     new RefactoringEngineer(),
     new BehaviorVerifier(),
+    new PrincipleReviewer(),
+    new RegressionSentinel(),
     new Docent(),
   ];
   const map = new Map<string, VibeFixAgent>();
@@ -110,7 +122,12 @@ export class VibefixExecutor implements AgentExecutorPort {
 
     // Resumability: if this producer already wrote everything it produces,
     // replay a pass without re-invoking the model.
-    if (await this.services.store.hasArtifacts(definition.agentId, definition.produces)) {
+    // Exception: verification + engineer are attempt-scoped — never skip.
+    const attemptScoped =
+      definition.runsInPool === "verification" ||
+      definition.permission === "worktree-write" ||
+      definition.agentId === "minimality";
+    if (!attemptScoped && (await this.services.store.hasArtifacts(definition.agentId, definition.produces))) {
       return { outcome: "passed", artifactIds: [] };
     }
 

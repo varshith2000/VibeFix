@@ -89,12 +89,36 @@ export class Synthesis implements VibeFixAgent {
         const explanation = categoryExplanation(f);
         const diagram = beforeAfterMermaid(f, scope.length > 0 ? scope : [fileOf(f)]);
         const constraints: Constraint[] = ["no-public-api-change", "no-dependency-changes", "no-behavior-change"];
-        const modes: RefactoringMode[] =
-          risk.band === "high"
-            ? ["architecture", "modernization"]
-            : risk.band === "medium"
-              ? ["minimal", "architecture", "modernization"]
-              : ["minimal", "architecture", "modernization"];
+        const architectural =
+          f.recommendedChangeCategory === "extract-service" ||
+          f.recommendedChangeCategory === "introduce-boundary" ||
+          f.recommendedChangeCategory === "extract-module" ||
+          f.category === "architecture";
+        const mechanical =
+          f.recommendedChangeCategory === "extract-function" ||
+          f.recommendedChangeCategory === "deduplicate" ||
+          f.recommendedChangeCategory === "rename" ||
+          f.recommendedChangeCategory === "delete-dead-code" ||
+          f.recommendedChangeCategory === "restyle-consistency";
+        let modes: RefactoringMode[];
+        // Forbidden findings are already deferred above; remaining bands are low|medium|high.
+        if (risk.band === "high") {
+          modes = ["architecture", "modernization"];
+        } else if (architectural && risk.band === "medium") {
+          modes = ["architecture", "modernization"];
+        } else if (mechanical && risk.band === "low") {
+          modes = ["minimal", "architecture", "modernization"];
+          constraints.push("minimal-diff", "no-new-abstractions");
+        } else if (mechanical) {
+          modes = ["minimal", "architecture", "modernization"];
+          constraints.push("minimal-diff");
+        } else {
+          modes = ["minimal", "architecture", "modernization"];
+        }
+        if (f.category === "security") {
+          // Security findings stay informational unless modernization mode.
+          modes = ["modernization"];
+        }
         proposals.push({
           proposalId: `RFC-${String(i + 1).padStart(3, "0")}`,
           title: `${f.recommendedChangeCategory.replace(/-/g, " ")}: ${f.title}`.slice(0, 120),

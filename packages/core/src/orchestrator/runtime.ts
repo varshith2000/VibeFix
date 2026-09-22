@@ -42,6 +42,8 @@ export class OrchestratorRuntime {
       worktrees: WorktreeManager;
       meter: BudgetMeter;
       budgets: Budgets;
+      /** Config-level do-not-touch globs merged with Risk Assessor zones. */
+      protectedPaths?: string[];
     },
     initialState: RunState,
   ) {
@@ -169,7 +171,7 @@ export class OrchestratorRuntime {
     const input: AgentExecutionInput = { runState: this.snapshot() };
     await this.runAgentGuarded(agentId, input);
     const phase = def.phase;
-    if (phase === "riskAssessment" || phase === "synthesis" || phase === "harness" || phase === "report") {
+    if (phase === "riskAssessment" || phase === "synthesis" || phase === "minimality" || phase === "harness" || phase === "report") {
       await this.dispatch({ type: "PHASE_COMPLETED", phase });
     }
   }
@@ -217,19 +219,19 @@ export class OrchestratorRuntime {
       return;
     }
     const engineer = this.defs.find((d) => d.permission === "worktree-write");
-    const verifier = this.defs.find((d) => d.phase === "verification");
-    if (!engineer || !verifier) {
-      await this.dispatch({ type: "FATAL", message: "engineer or verifier agent missing from registry" });
+    if (!engineer) {
+      await this.dispatch({ type: "FATAL", message: "engineer agent missing from registry" });
       return;
     }
 
     const handle = await this.deps.worktrees.create(proposalId, attempt);
-    const firewall = new ChangeFirewall(proposal, await this.forbiddenZones());
+    const zones = await this.forbiddenZones();
+    const firewall = new ChangeFirewall(proposal, zones);
     const baseInput: AgentExecutionInput = {
       runState: this.snapshot(),
       proposal,
       attempt,
-      forbiddenZones: await this.forbiddenZones(),
+      forbiddenZones: zones,
     };
 
     await this.deps.events.append(this.runId, "agent.progress", {
@@ -262,14 +264,19 @@ export class OrchestratorRuntime {
 
     const diff = await this.deps.worktrees.diff(handle);
     if (diff.trim().length === 0) {
-      // Empty diff = nothing to verify; treat as a no-op pass so the loop advances.
+      // Empty diff is a FAILED attempt — never auto-pass a no-op as "safe".
       await this.appendLedger({
         proposalId, attempt, handle, diff: "",
-        verdict: "passed",
-        verifierNotes: ["no changes produced (no-op)"],
+        verdict: "rejected",
+        verifierNotes: ["engineer produced an empty diff — no structural change to verify"],
       });
       await this.deps.worktrees.discard(handle).catch(() => undefined);
-      await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "passed", reason: "no-op" });
+      await this.dispatch({
+        type: "GATE_VERDICT",
+        proposalId,
+        verdict: "rejected",
+        reason: "empty diff — nothing to verify",
+      });
       return;
     }
 
@@ -285,22 +292,40 @@ export class OrchestratorRuntime {
       return;
     }
 
-    // Fresh-context verification: diff + proposal + baseline only, never engineer reasoning.
-    await this.dispatch({ type: "AGENT_STARTED", agentId: verifier.agentId });
-    const verifierOutcome = await this.safeExecute(verifier, { ...baseInput, worktree: handle });
-    await this.dispatch({
-      type: "AGENT_RESULT",
-      agentId: verifier.agentId,
-      outcome: verifierOutcome.outcome === "passed" ? "passed" : "rejected",
-      artifactIds: verifierOutcome.artifactIds,
-    });
+    const verifiers = this.defs
+      .filter((d) => d.runsInPool === "verification" || d.phase === "verification")
+      .sort((a, b) => (a.gateOrder ?? 99) - (b.gateOrder ?? 99));
+    const pool = [...new Map(verifiers.map((v) => [v.agentId, v])).values()];
+    if (pool.length === 0) {
+      await this.dispatch({ type: "FATAL", message: "no verification agents in registry" });
+      return;
+    }
 
-    if (verifierOutcome.outcome === "passed") {
+    const notes: string[] = [];
+    let allPassed = true;
+    for (const gate of pool) {
+      await this.dispatch({ type: "AGENT_STARTED", agentId: gate.agentId });
+      const outcome = await this.safeExecute(gate, { ...baseInput, worktree: handle });
+      await this.dispatch({
+        type: "AGENT_RESULT",
+        agentId: gate.agentId,
+        outcome: outcome.outcome === "passed" ? "passed" : "rejected",
+        artifactIds: outcome.artifactIds,
+      });
+      if (outcome.outcome !== "passed") {
+        allPassed = false;
+        notes.push(`${gate.agentId}: ${outcome.reason ?? outcome.error ?? "rejected"}`);
+        break; // fail-fast; remaining gates unnecessary
+      }
+      notes.push(`${gate.agentId}: passed`);
+    }
+
+    if (allPassed) {
       const landed = await this.deps.worktrees.landOnMainBranch(handle, commit.ref);
       await this.appendLedger({
         proposalId, attempt, handle, diff,
         verdict: landed.ok ? "passed" : "rejected",
-        verifierNotes: landed.ok ? [] : ["cherry-pick conflict; user branch untouched"],
+        verifierNotes: landed.ok ? notes : [...notes, "cherry-pick conflict; user branch untouched"],
         committedRef: landed.ok ? commit.ref : null,
       });
       await this.deps.worktrees.discard(handle).catch(() => undefined);
@@ -316,10 +341,15 @@ export class OrchestratorRuntime {
     await this.appendLedger({
       proposalId, attempt, handle, diff,
       verdict: "rejected",
-      verifierNotes: verifierOutcome.reason ? [verifierOutcome.reason] : [],
+      verifierNotes: notes,
     });
     await this.deps.worktrees.discard(handle).catch(() => undefined);
-    await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason: verifierOutcome.reason });
+    await this.dispatch({
+      type: "GATE_VERDICT",
+      proposalId,
+      verdict: "rejected",
+      reason: notes.find((n) => !n.endsWith(": passed")) ?? "verification pool rejected",
+    });
   }
 
   private async safeExecute(def: AgentDefinition, input: AgentExecutionInput): Promise<AgentExecutionOutcome> {
@@ -331,28 +361,47 @@ export class OrchestratorRuntime {
   }
 
   private async loadProposal(proposalId: string): Promise<ChangeProposal | null> {
-    if (!this.backlog) {
-      const artifact = await this.deps.store.latest("backlog");
-      if (!artifact) return null;
-      const parsed = BacklogArtifactSchema.parse(artifact.data);
-      this.backlog = parsed.proposals;
+    // Always re-read latest backlog (minimality rewrites it after synthesis).
+    const artifact = await this.deps.store.latest("backlog");
+    if (artifact) {
+      try {
+        const parsed = BacklogArtifactSchema.parse(artifact.data);
+        this.backlog = parsed.proposals;
+        const hit = parsed.proposals.find((p) => p.proposalId === proposalId);
+        if (hit) return hit;
+      } catch {
+        // fall through to full scan
+      }
     }
-    return this.backlog.find((p) => p.proposalId === proposalId) ?? null;
+    // Fallback: scan every backlog artifact (synthesis vs minimality).
+    for (const art of await this.deps.store.list(undefined, "backlog")) {
+      try {
+        const parsed = BacklogArtifactSchema.parse(art.data);
+        const hit = parsed.proposals.find((p) => p.proposalId === proposalId);
+        if (hit) {
+          this.backlog = parsed.proposals;
+          return hit;
+        }
+      } catch {
+        // skip
+      }
+    }
+    return null;
   }
 
   private forbiddenZonesCache: string[] | null = null;
 
-  /** Do-not-touch globs from the Risk Assessor artifact, cached for the run. */
+  /** Do-not-touch globs: Risk Assessor zones ∪ config.protectedPaths. */
   private async forbiddenZones(): Promise<string[]> {
     if (this.forbiddenZonesCache) return this.forbiddenZonesCache;
     const artifact = await this.deps.store.latest("risk-assessments");
-    let zones: string[] = [];
+    let zones: string[] = [...(this.deps.protectedPaths ?? [])];
     if (artifact) {
       try {
         const parsed = RiskAssessmentsArtifactSchema.parse(artifact.data);
-        zones = parsed.forbiddenZones;
+        zones = [...new Set([...zones, ...parsed.forbiddenZones])];
       } catch {
-        zones = [];
+        // keep protectedPaths only
       }
     }
     this.forbiddenZonesCache = zones;
@@ -431,6 +480,7 @@ export class OrchestratorRuntime {
         return this.resumePool("diagnosis");
       case "riskAssessment":
       case "synthesis":
+      case "minimality":
       case "harness":
       case "report": {
         const def = this.defs.find((d) => d.phase === s.phase);
@@ -443,7 +493,12 @@ export class OrchestratorRuntime {
       case "execution": {
         const proposalId = s.execution.queue[s.execution.currentIndex];
         if (proposalId === undefined) {
-          return this.dispatch({ type: "PHASE_COMPLETED", phase: "execution" });
+          // Queue drained — enter report via Docent, not a phantom PHASE_COMPLETED.
+          const docent = this.defs.find((d) => d.phase === "report");
+          if (docent && !isTerminal(s.agentStates[docent.agentId])) {
+            return this.runSequentialAgent(docent.agentId);
+          }
+          return this.dispatch({ type: "PHASE_COMPLETED", phase: "report" });
         }
         return this.executeProposal(proposalId, s.execution.attempt);
       }
@@ -473,9 +528,9 @@ function isTerminal(status: RunState["agentStates"][string] | undefined): boolea
 
 function registryFrom(defs: AgentDefinition[]) {
   return {
-    agentIdsByPool: (pool: "recon" | "diagnosis") =>
+    agentIdsByPool: (pool: "recon" | "diagnosis" | "verification") =>
       defs.filter((d) => d.runsInPool === pool).map((d) => d.agentId),
-    agentIdByPhase: (phase: "riskAssessment" | "synthesis" | "harness" | "report") =>
+    agentIdByPhase: (phase: "riskAssessment" | "synthesis" | "minimality" | "harness" | "report") =>
       defs.find((d) => d.phase === phase)?.agentId ?? null,
   };
 }

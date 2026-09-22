@@ -72,7 +72,16 @@ export class RiskAssessor implements VibeFixAgent {
       allFindings.forEach((finding, i) => {
         const llmScore = llmScores?.[i];
         const deterministic = this.deterministicBaseline(finding, noTests, untestedDirs);
-        const value = llmScore !== undefined ? Math.round(0.6 * llmScore + 0.4 * deterministic) : deterministic;
+        let value = llmScore !== undefined ? Math.round(0.6 * llmScore + 0.4 * deterministic) : deterministic;
+        // Mechanical cleanups should almost never be untouchable — LLM pessimism
+        // alone must not ban every smell on an untested repo.
+        const mechanical =
+          finding.recommendedChangeCategory === "extract-function" ||
+          finding.recommendedChangeCategory === "deduplicate" ||
+          finding.recommendedChangeCategory === "rename" ||
+          finding.recommendedChangeCategory === "restyle-consistency" ||
+          finding.recommendedChangeCategory === "delete-dead-code";
+        if (mechanical && value >= 85) value = 75;
         const band = bandFor(value);
         assessments[finding.findingId] = {
           value,

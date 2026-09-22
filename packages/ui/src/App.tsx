@@ -8,10 +8,11 @@ import { CheckpointPanel, ExecutionPanel, FindingsPanel, ReportPanel } from "./c
 import { SettingsPanel } from "./components/SettingsPanel";
 import { CodebasePanel } from "./components/CodebasePanel";
 import { AgentDetail } from "./components/AgentDetail";
+import { HealthPanel } from "./components/HealthPanel";
 import type { RepoConfig } from "./types";
 
 type Screen = "open" | "run";
-type View = "overview" | "codebase" | "findings" | "checkpoint" | "execution" | "report" | "runs" | "settings";
+type View = "overview" | "health" | "codebase" | "findings" | "checkpoint" | "execution" | "report" | "runs" | "settings";
 
 const RECENTS_KEY = "vibefix.recentProjects";
 
@@ -95,7 +96,14 @@ function QuickModelPick({ repoPath }: { repoPath: string }) {
   const assign = (kind: "TextGeneration" | "TypedDecision", providerId: string) => {
     const next = structuredClone(config);
     for (const [agentId, route] of Object.entries(next.routing.routes)) {
-      const isDecision = ["risk-assessor", "synthesis", "verifier"].includes(agentId);
+      const isDecision = [
+        "risk-assessor",
+        "synthesis",
+        "minimality",
+        "verifier",
+        "principle-reviewer",
+        "regression-sentinel",
+      ].includes(agentId);
       if ((kind === "TypedDecision") === isDecision) route.providerId = providerId;
     }
     save.mutate(next);
@@ -131,7 +139,7 @@ function QuickModelPick({ repoPath }: { repoPath: string }) {
         </label>
       </div>
       <p className="mt-1 text-[10px] text-slate-600">
-        {saved ? "saved ✓" : "Per-agent routing lives in ⚙ Settings — this sets all seven generators / three deciders at once."}
+        {saved ? "saved ✓" : "Per-agent routing lives in ⚙ Settings — this sets all generators / decision agents at once."}
       </p>
     </div>
   );
@@ -186,14 +194,19 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
   const recents = loadRecents().filter((r) => r !== (open.variables ?? ""));
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-5 px-6 py-10">
+    <div className="relative mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-5 px-6 py-10">
+      <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+        <div className="absolute -left-24 top-10 h-72 w-72 rounded-full bg-sky-600/10 blur-3xl" />
+        <div className="absolute -right-16 bottom-20 h-64 w-64 rounded-full bg-emerald-500/10 blur-3xl" />
+      </div>
       <div>
-        <h1 className="text-3xl font-bold text-slate-100">
+        <h1 className="font-display text-4xl tracking-tight text-slate-100">
           Vibe<span className="text-sky-400">Fix</span>
         </h1>
-        <p className="mt-2 text-sm text-slate-400">
-          The multi-agent refactoring control plane. Understand → preserve → improve → verify → explain.
-          <span className="text-emerald-400"> Nothing in your code changes until you approve it.</span>
+        <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-400">
+          Software-engineering control plane for vibe-coded repos.
+          Understand → preserve → improve → verify → explain.
+          <span className="text-emerald-400"> Nothing changes until you approve it.</span>
         </p>
       </div>
 
@@ -364,6 +377,7 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
 
 const NAV: Array<{ id: View; label: string }> = [
   { id: "overview", label: "Pipeline" },
+  { id: "health", label: "Health" },
   { id: "codebase", label: "Codebase" },
   { id: "findings", label: "Findings" },
   { id: "checkpoint", label: "Checkpoint" },
@@ -373,7 +387,15 @@ const NAV: Array<{ id: View; label: string }> = [
   { id: "settings", label: "Settings" },
 ];
 
-function RunScreen({ repoPath, runId }: { repoPath: string; runId: string }) {
+function RunScreen({
+  repoPath,
+  runId,
+  onSwitchRun,
+}: {
+  repoPath: string;
+  runId: string;
+  onSwitchRun: (runId: string) => void;
+}) {
   const { runState, connect, usage } = useRunStore();
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: api.agents });
   const { data: config } = useQuery({ queryKey: ["config", repoPath], queryFn: () => api.config(repoPath) });
@@ -527,6 +549,7 @@ function RunScreen({ repoPath, runId }: { repoPath: string; runId: string }) {
                 </div>
               </div>
             )}
+            {activeView === "health" && <HealthPanel runId={runId} />}
             {activeView === "codebase" && <CodebasePanel repoPath={repoPath} runId={runId} />}
             {activeView === "findings" && <FindingsPanel runId={runId} />}
             {activeView === "checkpoint" && (
@@ -534,7 +557,16 @@ function RunScreen({ repoPath, runId }: { repoPath: string; runId: string }) {
             )}
             {activeView === "execution" && <ExecutionPanel runId={runId} />}
             {activeView === "report" && <ReportPanel runId={runId} />}
-            {activeView === "runs" && <RunsPanel repoPath={runId ? repoPath : ""} onOpened={(id) => window.location.reload()} currentRunId={runId} />}
+            {activeView === "runs" && (
+              <RunsPanel
+                repoPath={repoPath}
+                currentRunId={runId}
+                onOpened={(id) => {
+                  onSwitchRun(id);
+                  void queryClient.invalidateQueries();
+                }}
+              />
+            )}
             {activeView === "settings" && agents && (
               <SettingsPanel repoPath={repoPath} agents={agents} onClose={() => setView("overview")} />
             )}
@@ -607,5 +639,11 @@ export default function App() {
       />
     );
   }
-  return active?.runId ? <RunScreen repoPath={active.repoPath} runId={active.runId} /> : null;
+  return active?.runId ? (
+    <RunScreen
+      repoPath={active.repoPath}
+      runId={active.runId}
+      onSwitchRun={(nextId) => setActive({ repoPath: active.repoPath, runId: nextId })}
+    />
+  ) : null;
 }

@@ -6,6 +6,7 @@ export type RunPhase =
   | "diagnosis"
   | "riskAssessment"
   | "synthesis"
+  | "minimality"
   | "awaitingApproval"
   | "harness"
   | "execution"
@@ -153,5 +154,51 @@ export interface Report {
     changesDeferred: number;
     publicApiChanges: number;
     tokensSpent: number;
+  };
+}
+
+export interface ProductIntent {
+  productSummary: string;
+  coreAreas: string[];
+  frozenAreas: string[];
+  activeChurnAreas: string[];
+  intentConstraints: string[];
+  sources: string[];
+  notes?: string[];
+}
+
+export interface ProjectIntelligence {
+  graph: {
+    summary: {
+      languages: string[];
+      frameworks: string[];
+      entrypoints: string[];
+      buildSystem: string | null;
+      packageManager: string | null;
+      testFrameworks: string[];
+      loc: number;
+      fileCount: number;
+      unknowns: string[];
+    };
+  } | null;
+  intent: ProductIntent | null;
+  survey: {
+    frameworks: string[];
+    testFileCount: number;
+    canTest: boolean;
+    untestedPaths: string[];
+  } | null;
+  findingCounts: {
+    total: number;
+    byCategory: Record<string, number>;
+    byBand: Record<string, number>;
+  };
+  health: {
+    architecture: number;
+    maintainability: number;
+    testing: number;
+    security: number;
+    dependencyHygiene: number;
+    documentation: number;
   };
 }

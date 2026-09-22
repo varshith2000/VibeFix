@@ -79,6 +79,6 @@ export interface CommandRunner {
 
 /** Test/build execution capability. */
 export interface TestRunner {
-  detectCommands(root: string): { install?: string; build?: string; test?: string; typecheck?: string };
+  detectCommands(root: string): { install?: string; build?: string; test?: string; typecheck?: string; lint?: string };
   runCommand(root: string, command: string, timeoutMs?: number): Promise<TestRunResult>;
 }

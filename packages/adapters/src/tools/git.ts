@@ -81,6 +81,32 @@ export class GitTool {
     return res.code === 0 ? res.stdout.trim() : null;
   }
 
+  /** Recent commit subjects for intent / churn inference. */
+  async recentLog(limit = 40): Promise<string[]> {
+    const res = await this.git(["log", `-${limit}`, "--pretty=format:%s"]);
+    if (res.code !== 0) return [];
+    return res.stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  }
+
+  /** Paths touched most often in recent history (best-effort churn signal). */
+  async hotPaths(limit = 30): Promise<string[]> {
+    const res = await this.git(["log", "-40", "--name-only", "--pretty=format:"]);
+    if (res.code !== 0) return [];
+    const counts = new Map<string, number>();
+    for (const line of res.stdout.split("\n")) {
+      const p = line.trim().replace(/\\/g, "/");
+      if (!p || p.startsWith(".")) continue;
+      counts.set(p, (counts.get(p) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([p]) => p);
+  }
+
   async addWorktree(worktreePath: string, branchName: string): Promise<ProcessResult> {
     // Ensure Windows long-path tolerance inside this repo's config.
     await this.git(["config", "core.longpaths", "true"]);

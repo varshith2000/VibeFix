@@ -22,18 +22,45 @@ export function RiskBadge({ band, value }: { band: string; value: number }) {
 
 export function FindingsPanel({ runId }: { runId: string }) {
   const { data } = useQuery({ queryKey: ["findings", runId], queryFn: () => api.findings(runId), refetchInterval: 4_000 });
-  const findings: Finding[] = data?.findings ?? [];
+  const raw: Finding[] = data?.findings ?? [];
+  // Prefer synthesis-merged copy when duplicate IDs appear across producers.
+  const byId = new Map<string, Finding>();
+  for (const f of raw) byId.set(f.findingId, f);
+  const findings = [...byId.values()];
   const [category, setCategory] = useState<string>("all");
+  const [band, setBand] = useState<string>("all");
   const categories = ["all", ...new Set(findings.map((f) => f.category))];
-  const shown = category === "all" ? findings : findings.filter((f) => f.category === category);
+  const shown = findings.filter((f) => {
+    if (category !== "all" && f.category !== category) return false;
+    if (band !== "all" && f.risk.band !== band) return false;
+    return true;
+  });
+
+  const counts = {
+    forbidden: findings.filter((f) => f.risk.band === "forbidden").length,
+    high: findings.filter((f) => f.risk.band === "high").length,
+    medium: findings.filter((f) => f.risk.band === "medium").length,
+    low: findings.filter((f) => f.risk.band === "low").length,
+  };
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-lg border border-slate-800 bg-ink-900">
-      <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
           Findings ({findings.length})
         </span>
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
+          {(["all", "forbidden", "high", "medium", "low"] as const).map((b) => (
+            <button
+              key={b}
+              onClick={() => setBand(b)}
+              className={`rounded px-2 py-0.5 text-[10px] ${band === b ? "bg-violet-700 text-white" : "bg-slate-800 text-slate-400"}`}
+            >
+              {b === "all" ? "all risk" : `${b} ${counts[b]}`}
+            </button>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-1">
           {categories.map((c) => (
             <button
               key={c}
@@ -54,18 +81,22 @@ export function FindingsPanel({ runId }: { runId: string }) {
                 <span className="text-xs font-medium text-slate-200">{f.title}</span>
                 <RiskBadge band={f.risk.band} value={f.risk.value} />
               </div>
-              <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-500">
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
                 <code className="text-sky-400">{f.location || "—"}</code>
                 <span>{f.findingId}</span>
+                <span className="rounded bg-ink-950 px-1 text-slate-400">{f.category}</span>
                 <span>conf {(f.confidence * 100).toFixed(0)}%</span>
+                {f.proposedChangeId && <span className="text-violet-400">→ {f.proposedChangeId}</span>}
               </div>
             </summary>
             <p className="mt-2 text-[11px] text-slate-400">{f.impact}</p>
+            {f.risk.rationale && <p className="mt-1 text-[10px] italic text-slate-500">{f.risk.rationale}</p>}
             <ul className="mt-1 list-disc pl-4 text-[10px] text-slate-500">
               {f.evidence.slice(0, 8).map((e, i) => (
                 <li key={i} className="font-mono">{e}</li>
               ))}
             </ul>
+            <div className="mt-1 text-[10px] text-slate-600">recommended: {f.recommendedChangeCategory}</div>
           </details>
         ))}
       </div>
@@ -94,7 +125,7 @@ export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: () =
     },
   });
   const reject = useMutation({
-    mutationFn: () => api.abort(runId),
+    mutationFn: () => api.reject(runId),
     onSuccess: onDone,
   });
 

@@ -68,14 +68,20 @@ const TEST_CONFIG = {
     ],
     routes: {
       cartographer: { providerId: "mock-text" },
+      historian: { providerId: "mock-text" },
       "test-surveyor": { providerId: "mock-text" },
       "smell-detector": { providerId: "mock-text" },
       "arch-auditor": { providerId: "mock-text" },
+      "consistency-sentinel": { providerId: "mock-text" },
+      "security-agent": { providerId: "mock-text" },
       "risk-assessor": { providerId: "mock-decision" },
       synthesis: { providerId: "mock-decision" },
+      minimality: { providerId: "mock-decision" },
       "harness-builder": { providerId: "mock-text" },
       engineer: { providerId: "mock-text" },
       verifier: { providerId: "mock-decision" },
+      "principle-reviewer": { providerId: "mock-decision" },
+      "regression-sentinel": { providerId: "mock-decision" },
       docent: { providerId: "mock-text" },
     },
     budgets: { runMaxTokens: 4_000_000, maxChangesPerRun: 10, maxRetriesPerChange: 2, warnFraction: 0.8 },
@@ -99,30 +105,40 @@ describe("VibeFix end-to-end (scripted test doubles)", () => {
     const manager = await RunManager.open(repoPath, await testExecutorFactory(repoPath), {
       config: TEST_CONFIG as never,
     });
-    const { runtime } = await manager.createRun("minimal");
+    const { runtime } = await manager.createRun("architecture");
 
-    let approved = false;
-    const unsubscribe = runtime.events.subscribe((event) => {
-      if (event.type === "checkpoint.awaitingApproval" && !approved) {
-        approved = true;
-        void runtime.store.latest("backlog").then((artifact) => {
-          const proposals = artifact
-            ? (artifact.data as { proposals: Array<{ proposalId: string }> }).proposals
-            : [];
-          void runtime.dispatch({
-            type: "CHECKPOINT_APPROVED",
-            mode: "minimal",
-            approvedProposalIds: proposals.map((p) => p.proposalId),
-          });
-        });
-      }
+    const startDone = runtime.dispatch({ type: "START" });
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const s = runtime.snapshot();
+      if (s.phase === "awaitingApproval" || s.status === "failed" || s.status === "aborted") break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await startDone;
+
+    const snap = runtime.snapshot();
+    expect(snap.phase).toBe("awaitingApproval");
+    expect(snap.agentStates["historian"]).toBe("passed");
+    expect(snap.agentStates["synthesis"]).toBe("passed");
+    expect(snap.agentStates["minimality"]).toMatch(/passed|failed/);
+
+    const backlogArt = await runtime.store.latest("backlog");
+    expect(backlogArt).not.toBeNull();
+    const proposals = (backlogArt!.data as { proposals: Array<{ proposalId: string; allowedInModes: string[] }> })
+      .proposals;
+    expect(proposals.length).toBeGreaterThan(0);
+
+    const approvedIds = proposals
+      .filter((p) => p.allowedInModes.includes("architecture") || p.allowedInModes.includes("minimal"))
+      .map((p) => p.proposalId);
+    const toApprove = (approvedIds.length > 0 ? approvedIds : proposals.map((p) => p.proposalId)).slice(0, 3);
+
+    await runtime.dispatch({
+      type: "CHECKPOINT_APPROVED",
+      mode: "architecture",
+      approvedProposalIds: toApprove,
     });
 
-    await runtime.dispatch({ type: "START" });
-    unsubscribe();
-
-    // The auto-approve dispatch runs async inside the subscriber; wait for it.
-    const deadline = Date.now() + 120_000;
     while (Date.now() < deadline) {
       const s = runtime.snapshot();
       if (s.status === "completed" || s.status === "failed" || s.status === "aborted") break;
@@ -133,15 +149,14 @@ describe("VibeFix end-to-end (scripted test doubles)", () => {
     expect(finalState.status).toBe("completed");
     expect(finalState.phase).toBe("completed");
     expect(finalState.agentStates["cartographer"]).toBe("passed");
-    expect(finalState.agentStates["verifier"]).toMatch(/passed|rejected/);
+    expect(finalState.agentStates["docent"]).toBe("passed");
+    expect(finalState.agentStates["verifier"]).toMatch(/passed|rejected|queued/);
+    if (finalState.budget.changesCommitted > 0) {
+      expect(finalState.agentStates["verifier"]).toMatch(/passed|rejected/);
+      expect(finalState.agentStates["principle-reviewer"]).toMatch(/passed|rejected/);
+      expect(finalState.agentStates["regression-sentinel"]).toMatch(/passed|rejected/);
+    }
 
-    // Evidence store has real artifacts
-    const backlog = await runtime.store.latest("backlog");
-    expect(backlog).not.toBeNull();
-    const proposals = (backlog!.data as { proposals: unknown[] }).proposals;
-    expect(proposals.length).toBeGreaterThan(0);
-
-    // Ledger + report exist on disk
     const ledgerPath = runPaths(repoPath, runtime.runId).ledgerFile;
     const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { entries: unknown[] };
     expect(ledger.entries.length).toBeGreaterThan(0);
@@ -150,7 +165,6 @@ describe("VibeFix end-to-end (scripted test doubles)", () => {
     const report = await readFile(reportPath, "utf8");
     expect(report).toContain("What did NOT change");
 
-    // Findings exist and carry evidence
     const findings = await runtime.store.list(undefined, "findings");
     const total = findings.reduce((acc, a) => acc + (a.data as { findings: unknown[] }).findings.length, 0);
     expect(total).toBeGreaterThan(0);

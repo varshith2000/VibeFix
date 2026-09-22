@@ -63,6 +63,22 @@ export function reduce(
           break;
         }
         case "synthesis": {
+          next.phase = "minimality";
+          const id = registry.agentIdByPhase("minimality");
+          if (id) {
+            next.agentStates[id] = "queued";
+            effects.push({ effect: "InvokeAgent", agentId: id });
+          } else {
+            // No minimality agent registered — fall through to checkpoint.
+            next.phase = "awaitingApproval";
+            next.status = "awaitingApproval";
+            next.approval = { requested: true, decidedAt: null, approvedItems: [], mode: null };
+            effects.push({ effect: "EmitEvent", type: "checkpoint.awaitingApproval" });
+            effects.push({ effect: "PauseForApproval" });
+          }
+          break;
+        }
+        case "minimality": {
           next.phase = "awaitingApproval";
           next.status = "awaitingApproval";
           next.approval = { requested: true, decidedAt: null, approvedItems: [], mode: null };
@@ -87,7 +103,8 @@ export function reduce(
         }
         case "report": {
           next.phase = "completed";
-          next.status = "completed";
+          // Preserve aborted status when the user rejected the backlog.
+          if (next.status !== "aborted") next.status = "completed";
           effects.push({ effect: "EmitEvent", type: "run.completed" });
           break;
         }
@@ -148,7 +165,13 @@ export function reduce(
       if (next.phase !== "awaitingApproval") break;
       next.status = "aborted";
       next.phase = "report";
+      next.error = "user rejected the backlog";
       effects.push({ effect: "EmitEvent", type: "run.aborted", message: "user rejected the backlog" });
+      const docent = registry.agentIdByPhase("report");
+      if (docent) {
+        next.agentStates[docent] = "queued";
+        effects.push({ effect: "InvokeAgent", agentId: docent });
+      }
       break;
     }
 
