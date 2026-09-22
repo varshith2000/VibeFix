@@ -135,6 +135,13 @@ export class RunManager {
     const paths = runPaths(this.repoPath, runId);
     const raw = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
     const state = raw as RunState;
+    // Heal stale "running" states: nothing executes while paused or terminal,
+    // so any agent still marked running was orphaned by a crash/restart.
+    if (state.status !== "running" && state.status !== "paused") {
+      for (const [id, s] of Object.entries(state.agentStates)) {
+        if (s === "running") state.agentStates[id] = "failed";
+      }
+    }
     return this.buildRuntime(runId, state);
   }
 

@@ -1,5 +1,8 @@
 import { create } from "zustand";
+import { api } from "./api";
 import type { RunEvent, RunState } from "./types";
+
+type WsStatus = "connecting" | "live" | "offline";
 
 interface RunStore {
   runId: string | null;
@@ -7,8 +10,12 @@ interface RunStore {
   events: RunEvent[];
   usage: { total: number; byAgent: Record<string, number>; byProvider: Record<string, number> };
   ws: WebSocket | null;
+  wsStatus: WsStatus;
+  lastEventAt: number | null;
   connect(runId: string): void;
   disconnect(): void;
+  /** REST resync (initial load, WS drop, or polling fallback). Idempotent by eventId. */
+  syncEvents(): Promise<void>;
   applySnapshot(state: RunState): void;
   applyUsage(usage: RunStore["usage"]): void;
   pushEvent(event: RunEvent): void;
@@ -22,44 +29,71 @@ export const useRunStore = create<RunStore>((set, get) => ({
   events: [],
   usage: EMPTY_USAGE,
   ws: null,
+  wsStatus: "offline",
+  lastEventAt: null,
 
   connect(runId: string) {
     get().disconnect();
-    set({ usage: EMPTY_USAGE });
+    set({ usage: EMPTY_USAGE, events: [], lastEventAt: null, wsStatus: "connecting" });
+    void get().syncEvents(); // durable REST log works even if WS never connects
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${protocol}://${location.host}/ws?runId=${runId}`);
+    ws.onopen = () => {
+      set({ wsStatus: "live" });
+      void get().syncEvents(); // catch anything missed before the socket opened
+    };
     ws.onmessage = (msg) => {
       try {
         const frame = JSON.parse(msg.data as string) as
           | { t: "snapshot"; state: RunState }
           | { t: "usage"; usage: RunStore["usage"] }
-          | { t: "event"; event: RunEvent; seq: number };
+          | { t: "event"; event: RunEvent; seq: number }
+          | { t: "readonly"; runId: string };
         if (frame.t === "snapshot") get().applySnapshot(frame.state);
         else if (frame.t === "usage") get().applyUsage(frame.usage);
-        else get().pushEvent(frame.event);
+        else if (frame.t === "event") get().pushEvent(frame.event);
+        else if (frame.t === "readonly") set({ wsStatus: "offline" }); // replay-only socket; REST polling feeds updates
       } catch {
         // ignore malformed frame
       }
     };
     ws.onclose = () => {
-      // simple reconnect with backoff; server keeps the event log for resync
-      if (get().runId === runId) {
-        setTimeout(() => {
-          if (get().runId === runId) get().connect(runId);
-        }, 2_000);
-      }
+      if (get().runId !== runId) return;
+      set({ wsStatus: "offline" });
+      // Reconnect with backoff; the REST event log (and 3s polling) keeps the
+      // UI fed meanwhile, so a dropped socket never means a blank stream.
+      setTimeout(() => {
+        if (get().runId === runId) get().connect(runId);
+      }, 2_000);
     };
-    set({ runId, ws, events: [] });
+    set({ runId, ws });
+  },
+
+  async syncEvents() {
+    const { runId } = get();
+    if (!runId) return;
+    try {
+      const { events } = await api.events(runId);
+      if (get().runId !== runId || events.length === 0) return;
+      set((s) => {
+        const seen = new Set(s.events.map((e) => e.eventId));
+        const fresh = events.filter((e) => !seen.has(e.eventId));
+        if (fresh.length === 0) return {};
+        const merged = [...s.events, ...fresh].sort((a, b) => a.seq - b.seq).slice(-500);
+        return { events: merged, lastEventAt: Date.now() };
+      });
+    } catch {
+      // server unreachable — polling retries
+    }
   },
 
   disconnect() {
-    const { ws, runId } = get();
-    set({ runId: null });
+    const { ws } = get();
+    set({ runId: null, wsStatus: "offline" });
     if (ws) {
       ws.onclose = null;
       ws.close();
     }
-    void runId;
   },
 
   applySnapshot(state) {
@@ -71,7 +105,11 @@ export const useRunStore = create<RunStore>((set, get) => ({
   },
 
   pushEvent(event) {
-    set((s) => ({ events: [...s.events.slice(-499), event] }));
+    set((s) => {
+      // WS and REST can both deliver the same event — dedupe by eventId.
+      if (s.events.some((e) => e.eventId === event.eventId)) return {};
+      return { events: [...s.events.slice(-499), event].sort((a, b) => a.seq - b.seq), lastEventAt: Date.now() };
+    });
     // Snapshot-bearing events refresh agent states too.
     if (
       event.type.startsWith("agent.") ||

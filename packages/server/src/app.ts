@@ -13,7 +13,7 @@ import {
 } from "@vibefix/schemas";
 import { AGENT_DEFINITIONS } from "@vibefix/agents";
 import { NodeFsFacts, runCommand } from "@vibefix/adapters";
-import { loadRepoConfig, saveRepoConfig, runPaths, clonesDir } from "@vibefix/core";
+import { loadRepoConfig, saveRepoConfig, runPaths, clonesDir, vibefixHome, EvidenceStore } from "@vibefix/core";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -42,11 +42,71 @@ const SNAPSHOT_EVENTS = new Set([
 ]);
 
 export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {}) {
-  const app = Fastify({ logger: { level: process.env.VIBEFIX_LOG === "debug" ? "debug" : "warn" } });
+  const app = Fastify({ logger: { level: process.env.VIBEFIX_LOG ?? "info" } });
   void app.register(websocket);
   void app.register(cors, { origin: true });
 
   void options;
+
+  /**
+   * Locate a run's directory on disk when no live runtime is registered
+   * (server restarted, or the user is browsing an old run). Everything a run
+   * produced is durable on disk — the API should never go blind to it.
+   */
+  const findRunDir = async (runId: string): Promise<string | null> => {
+    const projectsRoot = path.join(vibefixHome(), "projects");
+    let projectDirs: string[] = [];
+    try {
+      projectDirs = (await fs.readdir(projectsRoot)).map((d) => path.join(projectsRoot, d));
+    } catch {
+      return null;
+    }
+    for (const dir of projectDirs) {
+      const runDir = path.join(dir, "runs", runId);
+      if (await fs.stat(runDir).then(() => true).catch(() => false)) return runDir;
+    }
+    return null;
+  };
+
+  /** Events from disk for runs without a live runtime. */
+  const diskEvents = async (runId: string, since: number) => {
+    const runDir = await findRunDir(runId);
+    if (!runDir) return [];
+    let content: string;
+    try {
+      content = await fs.readFile(path.join(runDir, "events.ndjson"), "utf8");
+    } catch {
+      return [];
+    }
+    const events: AgentExecutionEvent[] = [];
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as AgentExecutionEvent;
+        if (parsed.seq > since) events.push(parsed);
+      } catch {
+        // skip corrupt line
+      }
+    }
+    return events;
+  };
+
+  const diskState = async (runId: string): Promise<unknown | null> => {
+    const runDir = await findRunDir(runId);
+    if (!runDir) return null;
+    try {
+      return JSON.parse(await fs.readFile(path.join(runDir, "state.json"), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+
+  /** Read-only evidence reader over a run directory on disk. */
+  const diskEvidence = async (runId: string) => {
+    const runDir = await findRunDir(runId);
+    if (!runDir) return null;
+    return new EvidenceStore({ evidenceDir: path.join(runDir, "evidence") } as never);
+  };
 
   // ---------- catalog ----------
   app.get("/api/agents", async () => AGENT_DEFINITIONS);
@@ -141,7 +201,13 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
       const manager = await registry.open(decodePath(enc));
       const runtime = await manager.loadRun(runId);
       registry.registerRuntime(runtime, manager.repoPath);
-      return { runId, state: runtime.snapshot() };
+      const state = runtime.snapshot();
+      // A run whose on-disk status is "running" was interrupted by a server
+      // restart — resume it so the UI actually progresses.
+      if (state.status === "running") {
+        registry.track(runId, runtime.resume());
+      }
+      return { runId, state };
     } catch (err) {
       return reply.code(404).send({ error: String(err instanceof Error ? err.message : err) });
     }
@@ -220,8 +286,10 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   app.get("/api/runs/:runId", async (req, reply) => {
     const { runId } = req.params as { runId: string };
     const runtime = getRuntime(runId);
-    if (!runtime) return reply.code(404).send({ error: "unknown run (restart server?)" });
-    return runtime.snapshot();
+    if (runtime) return runtime.snapshot();
+    const state = await diskState(runId);
+    if (state) return state;
+    return reply.code(404).send({ error: "unknown run" });
   });
 
   app.get("/api/runs/:runId/usage", async (req, reply) => {
@@ -234,9 +302,12 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   app.get("/api/runs/:runId/events", async (req) => {
     const { runId } = req.params as { runId: string };
     const since = Number((req.query as { since?: string }).since ?? 0);
+    const sinceSeq = Number.isFinite(since) ? since : 0;
     const runtime = getRuntime(runId);
-    if (!runtime) return { events: [] };
-    return { events: await runtime.events.eventsSince(Number.isFinite(since) ? since : 0) };
+    // Live runtime streams from memory; otherwise the durable on-disk log
+    // serves the same events (server restart / browsing an old run).
+    if (!runtime) return { events: await diskEvents(runId, sinceSeq) };
+    return { events: await runtime.events.eventsSince(sinceSeq) };
   });
 
   app.post<{ Params: { runId: string }; Body: { mode?: RefactoringMode; approvedProposalIds?: string[] } }>(
@@ -280,9 +351,10 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   app.get("/api/runs/:runId/findings", async (req, reply) => {
     const { runId } = req.params as { runId: string };
     const entry = registry.runtime(runId);
-    if (!entry) return reply.code(404).send({ error: "unknown run" });
+    const store = entry?.runtime.store ?? (await diskEvidence(runId));
+    if (!store) return reply.code(404).send({ error: "unknown run" });
     const findings = [];
-    for (const artifact of await entry.runtime.store.list(undefined, "findings")) {
+    for (const artifact of await store.list(undefined, "findings")) {
       try {
         findings.push(...FindingsArtifactSchema.parse(artifact.data).findings);
       } catch {
@@ -295,8 +367,9 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   app.get("/api/runs/:runId/backlog", async (req, reply) => {
     const { runId } = req.params as { runId: string };
     const entry = registry.runtime(runId);
-    if (!entry) return reply.code(404).send({ error: "unknown run" });
-    const backlog = await entry.runtime.store.latest("backlog");
+    const store = entry?.runtime.store ?? (await diskEvidence(runId));
+    if (!store) return reply.code(404).send({ error: "unknown run" });
+    const backlog = await store.latest("backlog");
     if (!backlog) return { proposals: [], unaddressedFindings: [] };
     try {
       return BacklogArtifactSchema.parse(backlog.data);
@@ -308,7 +381,17 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   app.get("/api/runs/:runId/ledger", async (req, reply) => {
     const { runId } = req.params as { runId: string };
     const entry = registry.runtime(runId);
-    if (!entry) return reply.code(404).send({ error: "unknown run" });
+    if (!entry) {
+      // Durable on disk even without a live runtime.
+      const runDir = await findRunDir(runId);
+      const ledger = runDir
+        ? await fs
+            .readFile(path.join(runDir, "ledger.json"), "utf8")
+            .then((t) => JSON.parse(t) as { entries: ChangeLedgerEntry[] })
+            .catch(() => ({ entries: [] as ChangeLedgerEntry[] }))
+        : { entries: [] as ChangeLedgerEntry[] };
+      return ledger;
+    }
     const paths = runPaths(entry.runtime.snapshot().repoPath, runId);
     const ledger = await fs
       .readFile(paths.ledgerFile, "utf8")
@@ -320,33 +403,46 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   app.get("/api/runs/:runId/report", async (req, reply) => {
     const { runId } = req.params as { runId: string };
     const entry = registry.runtime(runId);
-    if (!entry) return reply.code(404).send({ error: "unknown run" });
-    const report = await entry.runtime.store.latest("report");
+    const store = entry?.runtime.store ?? (await diskEvidence(runId));
+    if (!store) return reply.code(404).send({ error: "unknown run" });
+    const report = await store.latest("report");
     if (!report) return reply.code(404).send({ error: "report not ready" });
     return ReportArtifactSchema.parse(report.data);
   });
 
   // ---------- websocket ----------
   app.get("/ws", { websocket: true }, (socket: WebSocket, req) => {
-    const query = req.query as { runId?: string; since?: string };
-    const runId = query.runId;
+    // NOTE: parse the raw URL — req.query is not reliably populated for
+    // proxied websocket upgrades in this @fastify/websocket version, and
+    // reading it crashed every /ws request with a 500.
+    const url = new URL(req.url ?? "/ws", "http://localhost");
+    const runId = url.searchParams.get("runId") ?? undefined;
+    const sinceParam = Number(url.searchParams.get("since") ?? 0);
+    const since = Number.isFinite(sinceParam) ? sinceParam : 0;
+    const send = (data: unknown) => {
+      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(data));
+    };
     if (!runId) {
       socket.close(4000, "runId required");
       return;
     }
     const entry = registry.runtime(runId);
     if (!entry) {
-      socket.close(4004, "unknown run");
+      // No live runtime (server restarted / old run): serve the durable
+      // on-disk snapshot + event log once, then keep the socket open. The
+      // UI's REST polling keeps it fresh — closing here used to put the UI
+      // into an endless close/reconnect "connecting" loop.
+      void Promise.all([diskState(runId), diskEvents(runId, since)]).then(([state, events]) => {
+        if (state) send({ t: "snapshot", state });
+        for (const event of events) send({ t: "event", event, seq: event.seq });
+        send({ t: "readonly", runId });
+      });
       return;
     }
     const runtime = entry.runtime;
-    const send = (data: unknown) => {
-      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(data));
-    };
     // Snapshot + replay, then live.
     send({ t: "snapshot", state: runtime.snapshot() });
-    const since = Number(query.since ?? 0);
-    void runtime.events.eventsSince(Number.isFinite(since) ? since : 0).then((events) => {
+    void runtime.events.eventsSince(since).then((events) => {
       for (const event of events) send({ t: "event", event, seq: event.seq });
     });
     const unsubscribe = runtime.events.subscribe((event: AgentExecutionEvent) => {

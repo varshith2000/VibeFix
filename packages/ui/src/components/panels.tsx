@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import type { ChangeProposal, Finding, LedgerEntry, Report } from "../types";
 import { Mermaid } from "./Mermaid";
+import { DiffView } from "./DiffView";
 
 const BAND_COLOR: Record<string, string> = {
   low: "bg-emerald-900/60 text-emerald-300",
@@ -246,9 +247,9 @@ export function ExecutionPanel({ runId }: { runId: string }) {
                 ))}
               </ul>
             )}
-            <pre className="mt-2 max-h-60 overflow-auto rounded bg-ink-950 p-2 font-mono text-[10px] text-slate-400">
-              {entry.diff.slice(0, 4_000) || "(empty diff)"}
-            </pre>
+            <div className="mt-2 max-h-60 overflow-auto rounded border border-slate-800">
+              <DiffView diff={entry.diff.slice(0, 20_000)} />
+            </div>
           </details>
         ))}
       </div>

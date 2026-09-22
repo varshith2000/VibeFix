@@ -6,14 +6,18 @@ import { z } from "zod";
 import { passed, rejected, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
 
+// Lenient on purpose: models under JSON mode sometimes omit fields or wrap
+// values oddly. A repairable answer beats a rejected attempt.
 const EditsSchema = z.object({
-  rationale: z.string().min(1),
-  edits: z.array(
-    z.object({
-      path: z.string().min(1),
-      newContent: z.string(),
-    }),
-  ),
+  rationale: z.string().catch(""),
+  edits: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        newContent: z.string(),
+      }),
+    )
+    .default([]),
 });
 
 /**
@@ -74,59 +78,92 @@ export class RefactoringEngineer implements VibeFixAgent {
             // new files are fine
           }
         }
-        const result = await ctx.llm.complete({
-          system:
-            "You are the Refactoring Engineer in VibeFix, an automated behavior-preserving refactoring system.\n" +
-            "PRIME DIRECTIVE: the program's observable behavior must not change. You are moving structure, never logic.\n\n" +
-            "WORK RULES:\n" +
-            "1. Implement EXACTLY the stated proposal — nothing else, no drive-by edits, no reformatting of untouched code.\n" +
-            "2. Move / extract / rename / delete-dead-code. NEVER rewrite business logic, change control flow, alter " +
-            "error semantics, reorder side effects, or change what functions return.\n" +
-            "3. Preserve every public interface: same exported names, signatures, routes, response shapes. " +
-            "Call sites keep working unchanged.\n" +
-            "4. When extracting: the extracted unit keeps the ORIGINAL code verbatim as its body; the original site " +
-            "becomes a call/delegation to it.\n" +
-            "5. When deduplicating: choose the most complete copy as the shared implementation; others become calls.\n" +
-            "6. Smallest diff that honestly achieves the proposal's stated goal.\n" +
-            "7. Touch ONLY paths that appear in filesInScope. New files ARE allowed if they are inside a scoped directory.\n" +
-            "8. No dependency changes, no config changes, no schema changes, no comment-only changes.\n\n" +
-            "OUTPUT: full new content for every file you modify or create (files you don't touch must NOT appear).",
-          messages: [
-            {
-              role: "user",
-              content: JSON.stringify(
-                {
-                  proposal: {
-                    id: proposal.proposalId,
-                    title: proposal.title,
-                    problem: proposal.problem,
-                    evidence: proposal.evidence,
-                    filesInScope: proposal.filesInScope,
-                    constraints: proposal.constraints,
-                    expectedBenefit: proposal.expectedBenefit,
-                    ...(proposal.explanation
-                      ? {
-                          currentState: proposal.explanation.currentState,
-                          proposedState: proposal.explanation.proposedState,
-                        }
-                      : {}),
-                  },
-                  mode: ctx.runState.mode,
-                  forbiddenZones: ctx.forbiddenZones ?? [],
-                  files: fileContents,
-                },
-                null,
-                2,
-              ),
+        const system =
+          "You are the Refactoring Engineer in VibeFix, an automated behavior-preserving refactoring system.\n" +
+          "PRIME DIRECTIVE: the program's observable behavior must not change. You are moving structure, never logic.\n\n" +
+          "WORK RULES:\n" +
+          "1. Implement EXACTLY the stated proposal — nothing else, no drive-by edits, no reformatting of untouched code.\n" +
+          "2. Move / extract / rename / delete-dead-code. NEVER rewrite business logic, change control flow, alter " +
+          "error semantics, reorder side effects, or change what functions return.\n" +
+          "3. Preserve every public interface: same exported names, signatures, routes, response shapes. " +
+          "Call sites keep working unchanged.\n" +
+          "4. When extracting: the extracted unit keeps the ORIGINAL code verbatim as its body; the original site " +
+          "becomes a call/delegation to it.\n" +
+          "5. When deduplicating: choose the most complete copy as the shared implementation; others become calls.\n" +
+          "6. Smallest diff that honestly achieves the proposal's stated goal.\n" +
+          "7. Touch ONLY paths that appear in filesInScope. New files ARE allowed if they are inside a scoped directory.\n" +
+          "8. No dependency changes, no config changes, no schema changes, no comment-only changes.\n\n" +
+          "OUTPUT: a single JSON object {\"rationale\": string, \"edits\": [{\"path\": string, \"newContent\": string}]} " +
+          "with full new content for every file you modify or create (files you don't touch must NOT appear).";
+
+        const planPrompt = JSON.stringify(
+          {
+            proposal: {
+              id: proposal.proposalId,
+              title: proposal.title,
+              problem: proposal.problem,
+              evidence: proposal.evidence,
+              filesInScope: proposal.filesInScope,
+              constraints: proposal.constraints,
+              expectedBenefit: proposal.expectedBenefit,
+              ...(proposal.explanation
+                ? {
+                    currentState: proposal.explanation.currentState,
+                    proposedState: proposal.explanation.proposedState,
+                  }
+                : {}),
             },
-          ],
-          responseSchema: EditsSchema,
-          maxTokens: 16_384,
-          temperature: 0,
-          metadata: { agentId: ctx.def.agentId, step: "implement" },
-        });
-        const plan = result.structured;
-        if (!plan) throw new Error("model returned no structured edits");
+            mode: ctx.runState.mode,
+            forbiddenZones: ctx.forbiddenZones ?? [],
+            files: fileContents,
+          },
+          null,
+          2,
+        );
+
+        // One repair round: if the model's JSON doesn't match the schema,
+        // tell it exactly why and ask again before giving up on the attempt.
+        type EditsPlan = z.output<typeof EditsSchema>;
+        let plan: EditsPlan | undefined;
+        let lastError = "";
+        for (let round = 0; round < 2 && !plan; round++) {
+          try {
+            const result = await ctx.llm.complete({
+              system,
+              messages: [
+                { role: "user", content: planPrompt },
+                ...(round > 0
+                  ? [
+                      {
+                        role: "assistant" as const,
+                        content: "(previous answer was invalid)",
+                      },
+                      {
+                        role: "user" as const,
+                        content:
+                          `Your previous answer failed validation: ${lastError}\n` +
+                          'Return ONLY the JSON object {"rationale": "...", "edits": [{"path": "...", "newContent": "..."}]} — ' +
+                          "both fields are required, and edits must be a non-empty array.",
+                      },
+                    ]
+                  : []),
+              ],
+              responseSchema: EditsSchema as z.ZodType<EditsPlan>,
+              maxTokens: 16_384,
+              temperature: 0,
+              metadata: { agentId: ctx.def.agentId, step: "implement" },
+            });
+            // .default()/.catch() make the schema's input type looser than its
+            // output; complete<T> infers the input side, so cast to the output.
+            plan = result.structured as EditsPlan | undefined;
+          } catch (err) {
+            lastError = String(err instanceof Error ? err.message : err).slice(0, 400);
+            await ctx.progress(`model output failed validation (round ${round + 1})`, lastError);
+          }
+        }
+        if (!plan) {
+          return failed(new Error(`model output failed schema validation twice: ${lastError}`));
+        }
         if (plan.edits.length === 0) {
           return rejected("model proposed no edits — nothing to implement");
         }

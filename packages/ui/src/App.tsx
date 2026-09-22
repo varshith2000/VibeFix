@@ -386,11 +386,14 @@ function RunScreen({ repoPath, runId }: { repoPath: string; runId: string }) {
     return () => useRunStore.getState().disconnect();
   }, [runId, connect]);
 
-  // Polling fallback: even if the WebSocket drops, the UI re-syncs.
+  // Polling fallback: even if the WebSocket drops, the UI re-syncs state,
+  // usage AND the event stream (the REST log reads from disk too, so this
+  // also works for runs whose runtime is no longer live in the server).
   useEffect(() => {
     const timer = setInterval(() => {
       void api.run(runId).then((s) => useRunStore.getState().applySnapshot(s)).catch(() => undefined);
       void api.usage(runId).then((u) => useRunStore.getState().applyUsage(u)).catch(() => undefined);
+      void useRunStore.getState().syncEvents();
     }, 3_000);
     return () => clearInterval(timer);
   }, [runId]);
@@ -524,7 +527,7 @@ function RunScreen({ repoPath, runId }: { repoPath: string; runId: string }) {
                 </div>
               </div>
             )}
-            {activeView === "codebase" && <CodebasePanel repoPath={repoPath} />}
+            {activeView === "codebase" && <CodebasePanel repoPath={repoPath} runId={runId} />}
             {activeView === "findings" && <FindingsPanel runId={runId} />}
             {activeView === "checkpoint" && (
               <CheckpointPanel runId={runId} onDone={() => void queryClient.invalidateQueries()} />

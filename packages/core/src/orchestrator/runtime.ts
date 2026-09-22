@@ -74,10 +74,31 @@ export class OrchestratorRuntime {
     return structuredClone(this.state);
   }
 
-  /** Feed a command into the reducer, persist, perform effects. */
-  async dispatch(event: RunEvent): Promise<void> {
+  /**
+   * Feed a command into the reducer, persist, perform effects. The
+   * reduce→assign→persist section is SERIALIZED through a promise chain: pool
+   * agents dispatch concurrently, and concurrent persist()/rename() calls on
+   * Windows collide (EPERM) — a lost dispatch used to leave agents stuck
+   * "running" forever with no events. Effects run OUTSIDE the lock because
+   * they recursively dispatch (SpawnPool → agent dispatches), which would
+   * deadlock against a lock held across effect execution.
+   */
+  dispatch(event: RunEvent): Promise<void> {
+    const locked = this.dispatchQueue.then(() => this.reduceAndPersist(event));
+    // Keep the queue alive even if one dispatch fails; the error propagates
+    // to the caller, subsequent dispatches still run.
+    this.dispatchQueue = locked.then(
+      () => undefined,
+      () => undefined,
+    );
+    return locked.then((effects) => this.performEffects(effects));
+  }
+
+  private dispatchQueue: Promise<void> = Promise.resolve();
+
+  private async reduceAndPersist(event: RunEvent): Promise<ReturnType<typeof reduce>["effects"]> {
     if (this.state.status === "completed" || this.state.status === "aborted" || this.state.status === "failed") {
-      if (event.type !== "ABORT") return; // terminal: ignore stale work
+      if (event.type !== "ABORT") return []; // terminal: ignore stale work
     }
     const { state, effects } = reduce(
       this.state,
@@ -88,7 +109,7 @@ export class OrchestratorRuntime {
     this.state = state;
     this.state.budget.tokensSpent = this.deps.meter.tokens; // runtime-owned field
     await this.persist();
-    await this.performEffects(effects);
+    return effects;
   }
 
   private async performEffects(effects: ReturnType<typeof reduce>["effects"]): Promise<void> {
@@ -155,19 +176,33 @@ export class OrchestratorRuntime {
 
   private async runAgentGuarded(agentId: string, input: AgentExecutionInput): Promise<void> {
     const def = this.defById(agentId);
-    await this.dispatch({ type: "AGENT_STARTED", agentId });
-    let outcome: AgentExecutionOutcome;
     try {
-      outcome = await this.deps.executor.execute(def, input);
+      await this.dispatch({ type: "AGENT_STARTED", agentId });
+      let outcome: AgentExecutionOutcome;
+      try {
+        outcome = await this.deps.executor.execute(def, input);
+      } catch (err) {
+        outcome = { outcome: "failed", artifactIds: [], error: String(err) };
+      }
+      await this.dispatch({
+        type: "AGENT_RESULT",
+        agentId,
+        outcome: outcome.outcome,
+        artifactIds: outcome.artifactIds,
+      });
     } catch (err) {
-      outcome = { outcome: "failed", artifactIds: [], error: String(err) };
+      // The dispatch machinery itself failed (persist I/O, etc). NEVER leave
+      // the agent stuck "running": force a terminal state and tell the world
+      // directly through the event log.
+      this.state.agentStates[agentId] = "failed";
+      await this.deps.events
+        .append(this.runId, "agent.failed", {
+          agentId,
+          message: `orchestrator error while running '${agentId}': ${String(err instanceof Error ? err.message : err).slice(0, 300)}`,
+        })
+        .catch(() => undefined);
+      console.error(`[vibefix] run ${this.runId}: dispatch failed for ${agentId}:`, err);
     }
-    await this.dispatch({
-      type: "AGENT_RESULT",
-      agentId,
-      outcome: outcome.outcome,
-      artifactIds: outcome.artifactIds,
-    });
   }
 
   /**

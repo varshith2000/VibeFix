@@ -10,35 +10,53 @@ export interface HttpPostOptions {
 
 export async function postJson<T>(opts: HttpPostOptions): Promise<T> {
   const timeout = opts.timeoutMs ?? 120_000;
-  const timer = new AbortController();
-  const timeoutSignal = AbortSignal.timeout(timeout);
-  const onTimeout = () => timer.abort();
-  timeoutSignal.addEventListener("abort", onTimeout, { once: true });
-  opts.signal?.addEventListener("abort", onTimeout, { once: true });
 
-  let res: Response;
-  try {
-    res = await fetch(opts.url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...opts.headers },
-      body: JSON.stringify(opts.body),
-      signal: timer.signal,
-    });
-  } catch (err) {
-    throw new LlmError("network", `request failed: ${String(err)}`, "unknown", undefined, err);
-  } finally {
-    timeoutSignal.removeEventListener("abort", onTimeout);
-  }
-  if (!res.ok) {
+  // Transient upstream errors (429/5xx, e.g. Gemini "overloaded" 503s) are
+  // common under load. Retry with backoff before surfacing an error — a
+  // failed call here means a rejected change attempt a layer above.
+  const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+  const BACKOFF_MS = [1_000, 4_000, 9_000];
+  let lastError: LlmError | undefined;
+
+  for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+    if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]!);
+    const timer = new AbortController();
+    const timeoutSignal = AbortSignal.timeout(timeout);
+    const onTimeout = () => timer.abort();
+    timeoutSignal.addEventListener("abort", onTimeout, { once: true });
+    opts.signal?.addEventListener("abort", onTimeout, { once: true });
+
+    let res: Response;
+    try {
+      res = await fetch(opts.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...opts.headers },
+        body: JSON.stringify(opts.body),
+        signal: timer.signal,
+      });
+    } catch (err) {
+      timeoutSignal.removeEventListener("abort", onTimeout);
+      lastError = new LlmError("network", `request failed: ${String(err)}`, "unknown", undefined, err);
+      continue; // network errors are transient by nature
+    } finally {
+      timeoutSignal.removeEventListener("abort", onTimeout);
+    }
+    if (res.ok) return (await res.json()) as T;
+
     const body = await res.text().catch(() => "");
-    throw new LlmError(
+    lastError = new LlmError(
       httpErrorKind(res.status),
       `HTTP ${res.status}: ${body.slice(0, 500)}`,
       "unknown",
       res.status,
     );
+    if (!RETRYABLE.has(res.status)) throw lastError;
   }
-  return (await res.json()) as T;
+  throw lastError ?? new LlmError("network", "request failed", "unknown");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

@@ -38,4 +38,18 @@ const d = await decision.decide({
   ],
 });
 console.log("openrouter decision ->", JSON.stringify(d.answers), `(${d.usage.totalTokens} tokens)`);
-console.log("SMOKE OK: real providers responding");
+
+// Text fallback (openrouter-text) — what the engineer chain uses when Gemini is down.
+const { OpenRouterTextClient } = await import("../packages/llm/dist/index.js");
+const ort = new OpenRouterTextClient(
+  config.routing.providers.find((p) => p.providerId === "openrouter-text"),
+  process.env.OPENROUTER_API_KEY,
+);
+const ortResult = await ort.complete({
+  system: "Reply JSON only.",
+  messages: [{ role: "user", content: 'Reply {"ok":true,"note":"fallback works"}' }],
+  responseSchema: (await import("../packages/llm/node_modules/zod/index.js")).z.object({ ok: z.boolean(), note: z.string() }),
+  maxTokens: 2048,
+});
+console.log("openrouter-text fallback ->", JSON.stringify(ortResult.structured));
+console.log("SMOKE OK: real providers responding (gemini + openrouter decision + openrouter-text fallback)");

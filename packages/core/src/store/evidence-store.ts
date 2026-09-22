@@ -133,10 +133,32 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
   }
 }
 
-/** Atomic file write: temp file + rename, so a crash never leaves half JSON. */
+/**
+ * Atomic file write: temp file + rename, so a crash never leaves half JSON.
+ * Windows-hardened: the tmp name is unique per call (two writers in the same
+ * millisecond used to share a tmp file), and the rename retries — on Windows
+ * renaming over a path another handle (or antivirus) still holds fails with
+ * EPERM/EACCES for a few milliseconds.
+ */
 export async function atomicWrite(filePath: string, content: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${Date.now().toString(36)}`;
+  const tmp = `${filePath}.tmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   await fs.writeFile(tmp, content, "utf8");
-  await fs.rename(tmp, filePath);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.rename(tmp, filePath);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") {
+        await fs.rm(tmp, { force: true }).catch(() => undefined);
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+    }
+  }
+  await fs.rm(tmp, { force: true }).catch(() => undefined);
+  throw lastError;
 }

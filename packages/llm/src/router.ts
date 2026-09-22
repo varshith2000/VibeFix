@@ -18,6 +18,7 @@ import { GeminiClient } from "./providers/gemini.js";
 import { OllamaClient } from "./providers/ollama.js";
 import { JevClient } from "./providers/jev.js";
 import { OpenRouterDecisionClient } from "./providers/openrouter.js";
+import { OpenRouterTextClient } from "./providers/openrouter-text.js";
 import { MockTextClient } from "./providers/mock-text.js";
 import { MockDecisionClient } from "./providers/mock-decision.js";
 
@@ -50,6 +51,8 @@ function buildProvider(
       return new JevClient(config, key ?? "");
     case "openrouter":
       return new OpenRouterDecisionClient(config, key ?? "");
+    case "openrouter-text":
+      return new OpenRouterTextClient(config, key ?? "");
     case "mock-text":
       return mocks.mockText; // persistent instance: scripts + call counting survive rebuilds
     case "mock-decision":
