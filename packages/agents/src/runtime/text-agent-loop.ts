@@ -21,7 +21,10 @@ export async function enrich<T>(
       metadata: { agentId: ctx.def.agentId },
     });
     return result.structured;
-  } catch {
-    return undefined; // graceful degradation: deterministic facts stand alone
+  } catch (err) {
+    // Graceful degradation, but LOUD: a silently dead provider is what makes
+    // runs look like demo data. Record the failure in the run's event log.
+    await ctx.progress("llm enrichment failed — using deterministic content", String(err).slice(0, 300));
+    return undefined;
   }
 }

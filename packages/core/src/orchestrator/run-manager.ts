@@ -174,9 +174,20 @@ export class RunManager {
 export async function loadRepoConfig(repoPath: string): Promise<RepoConfig> {
   try {
     const raw = JSON.parse(await fs.readFile(configPath(repoPath), "utf8"));
-    return RepoConfigSchema.parse(raw);
+    const parsed = RepoConfigSchema.parse(raw);
+    // Mock providers were removed from the product; a persisted config still
+    // routing to them predates that and silently degrades every agent to
+    // deterministic demo output. Reset routing to the real-model defaults —
+    // UI edits made since (provider toggles, model picks) are re-applied there.
+    const routesToMock = Object.values(parsed.routing.routes).some(
+      (r) => r.providerId.startsWith("mock-") || r.fallbackProviderId?.startsWith("mock-"),
+    );
+    if (routesToMock) {
+      return { ...parsed, routing: structuredClone(DEFAULT_MODEL_ROUTING) };
+    }
+    return parsed;
   } catch {
-    // Sensible zero-key default: mock providers. Users upgrade via config UI.
+    // No config yet: real-models-only defaults, gated by API keys in the env.
     return RepoConfigSchema.parse({ routing: DEFAULT_MODEL_ROUTING });
   }
 }

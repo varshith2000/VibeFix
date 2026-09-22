@@ -114,9 +114,14 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       kind: "TypedDecision",
       adapter: "openrouter",
       apiKeyEnv: "OPENROUTER_API_KEY",
-      defaultModel: "typesafe/jev-latest",
-      contextWindowTokens: 32_000,
+      // Real OpenRouter model verified available (typesafe/jev-latest never
+      // existed there — decision calls silently degraded to deterministic
+      // fallbacks). Swap to a Jev model if/when TypeSafe ships there.
+      defaultModel: "google/gemini-3.8-flash",
+      contextWindowTokens: 1_000_000,
       maxOutputTokens: 2_048,
+      pricePerMTokInput: 0.75,
+      pricePerMTokOutput: 3.75,
       enabled: true,
     },
     {

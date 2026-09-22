@@ -22,8 +22,10 @@ export async function decide(
         metadata: { agentId: ctx.def.agentId, step: "decide" },
       });
       return { answers: result.answers, degraded: false };
-    } catch {
-      // fall through to deterministic fallback
+    } catch (err) {
+      // fall through to deterministic fallback, but record why — a dead
+      // provider silently returning mid-scores looks like mock data.
+      await ctx.progress("decision provider failed — using deterministic fallback", String(err).slice(0, 300));
     }
   }
   return { answers: deterministicAnswers(request), degraded: true };
