@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
+import { useRunStore } from "../store";
 import type { ChangeProposal, Finding, LedgerEntry, Report } from "../types";
 import { Mermaid } from "./Mermaid";
 import { DiffView } from "./DiffView";
@@ -104,7 +105,7 @@ export function FindingsPanel({ runId }: { runId: string }) {
   );
 }
 
-export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: () => void }) {
+export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: (outcome: "approved" | "rejected") => void }) {
   const queryClient = useQueryClient();
   const { data } = useQuery({ queryKey: ["backlog", runId], queryFn: () => api.backlog(runId) });
   const [mode, setMode] = useState("minimal");
@@ -119,14 +120,22 @@ export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: () =
 
   const approve = useMutation({
     mutationFn: () => api.approve(runId, mode, [...selected]),
-    onSuccess: () => {
+    onSuccess: async () => {
+      // Pull the fresh run state immediately so the header/status reflect the
+      // transition instead of waiting for the next poll tick.
+      try {
+        const state = await api.run(runId);
+        useRunStore.getState().applySnapshot(state);
+      } catch {
+        // WS snapshot / 3s poll will catch up
+      }
       void queryClient.invalidateQueries();
-      onDone();
+      onDone("approved");
     },
   });
   const reject = useMutation({
     mutationFn: () => api.reject(runId),
-    onSuccess: onDone,
+    onSuccess: () => onDone("rejected"),
   });
 
   const toggle = (id: string) => {
@@ -232,7 +241,7 @@ export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: () =
             disabled={selected.size === 0 || approve.isPending}
             className="rounded bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50"
           >
-            Approve {selected.size} → start transformation
+            {approve.isPending ? "Approving…" : `Approve ${selected.size} → start transformation`}
           </button>
         </div>
       </div>

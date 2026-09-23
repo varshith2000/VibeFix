@@ -234,6 +234,36 @@ export async function loadRepoConfig(repoPath: string): Promise<RepoConfig> {
     if (routesToMock) {
       return { ...parsed, routing: structuredClone(DEFAULT_MODEL_ROUTING) };
     }
+    // Configs saved before the direct-Gemini decision provider existed relay
+    // decision traffic through OpenRouter's Gemini. Add the gemini-decision
+    // provider and repoint the default decision routes at it — surgically, so
+    // the user's own text-model picks (e.g. a newer gemini flash) survive.
+    if (!parsed.routing.providers.some((p) => p.providerId === "gemini-decision")) {
+      const geminiDecision = structuredClone(DEFAULT_MODEL_ROUTING).providers.find(
+        (p) => p.providerId === "gemini-decision",
+      )!;
+      const openrouter = parsed.routing.providers.find((p) => p.providerId === "openrouter");
+      if (openrouter && openrouter.defaultModel === "google/gemini-2.5-flash") {
+        openrouter.defaultModel = "meta-llama/llama-3.3-70b-instruct:free";
+        openrouter.contextWindowTokens = geminiDecision.contextWindowTokens;
+        openrouter.pricePerMTokInput = undefined;
+        openrouter.pricePerMTokOutput = undefined;
+      }
+      const routes = { ...parsed.routing.routes };
+      for (const [agentId, route] of Object.entries(routes)) {
+        if (DEFAULT_MODEL_ROUTING.routes[agentId]?.providerId === "gemini-decision") {
+          routes[agentId] = { ...structuredClone(DEFAULT_MODEL_ROUTING.routes[agentId]) };
+        }
+      }
+      return {
+        ...parsed,
+        routing: {
+          ...parsed.routing,
+          providers: [...parsed.routing.providers, geminiDecision],
+          routes,
+        },
+      };
+    }
     // Merge in any newly-added agent routes so upgrades don't leave agents unrouted.
     return {
       ...parsed,

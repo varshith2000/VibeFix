@@ -85,7 +85,7 @@ export const api = {
 
   browseFs: (dir?: string) =>
     fetch(`/api/fs/browse${dir ? `?path=${encodeURIComponent(dir)}` : ""}`).then(
-      json<{ path: string; parent: string | null; dirs: string[]; error?: string }>,
+      json<{ path: string; parent: string | null; dirs: string[]; gitDirs?: string[]; drives?: string[]; error?: string }>,
     ),
 
   tree: (repoPath: string) =>

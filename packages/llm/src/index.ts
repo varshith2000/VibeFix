@@ -21,4 +21,5 @@ export { MockTextClient } from "./providers/mock-text.js";
 export { MockDecisionClient } from "./providers/mock-decision.js";
 export { extractFirstJson } from "./providers/http.js";
 export { OpenRouterTextClient } from "./providers/openrouter-text.js";
+export { GeminiDecisionClient } from "./providers/gemini-decision.js";
 export { zodHint } from "./providers/zod-hint.js";

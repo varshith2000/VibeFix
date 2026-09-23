@@ -47,21 +47,53 @@ function FolderBrowser({ onPick, onClose }: { onPick: (path: string) => void; on
         <div className="truncate border-b border-slate-800 px-3 py-1.5 font-mono text-[11px] text-sky-400">
           {data?.path ?? "…"}
         </div>
+        {(data?.drives ?? []).length > 0 && (
+          <div className="flex flex-wrap gap-1 border-b border-slate-800 px-2 py-1.5">
+            {data!.drives!.map((d) => (
+              <button
+                key={d}
+                onClick={() => setDir(d)}
+                className={`rounded px-2 py-0.5 font-mono text-[11px] ${
+                  data!.path.replace(/[\\/]+$/, "") === d.replace(/[\\/]+$/, "")
+                    ? "bg-sky-700 text-white"
+                    : "bg-ink-800 text-slate-300 hover:bg-slate-700"
+                }`}
+                title={`Go to ${d}`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto p-1">
           {data?.parent && (
             <button onClick={() => setDir(data.parent!)} className="block w-full px-3 py-1 text-left font-mono text-[11px] text-slate-400 hover:bg-slate-800/60">
               ../ (parent)
             </button>
           )}
-          {(data?.dirs ?? []).map((d) => (
-            <button
-              key={d}
-              onClick={() => setDir(`${data!.path.replace(/[\\/]+$/, "")}/${d}`)}
-              className="block w-full truncate px-3 py-1 text-left font-mono text-[11px] text-slate-300 hover:bg-slate-800/60"
-            >
-              {d}/
-            </button>
-          ))}
+          {[...(data?.dirs ?? [])]
+            .sort((a, b) => {
+              const ga = data?.gitDirs?.includes(a) ? 0 : 1;
+              const gb = data?.gitDirs?.includes(b) ? 0 : 1;
+              return ga - gb || a.localeCompare(b);
+            })
+            .map((d) => {
+              const isGit = data?.gitDirs?.includes(d) ?? false;
+              return (
+                <button
+                  key={d}
+                  onClick={() => setDir(`${data!.path.replace(/[\\/]+$/, "")}/${d}`)}
+                  className={`flex w-full items-center gap-2 px-3 py-1 text-left font-mono text-[11px] hover:bg-slate-800/60 ${isGit ? "text-slate-200" : "text-slate-400"}`}
+                >
+                  <span className="truncate">{d}/</span>
+                  {isGit && (
+                    <span className="shrink-0 rounded bg-emerald-900/60 px-1 text-[9px] font-semibold uppercase text-emerald-300" title="Git repository — openable in VibeFix">
+                      git
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           {data?.dirs.length === 0 && <div className="px-3 py-2 text-[11px] text-slate-600">no subfolders</div>}
         </div>
         <div className="border-t border-slate-800 p-2">
@@ -387,6 +419,61 @@ const NAV: Array<{ id: View; label: string }> = [
   { id: "settings", label: "Settings" },
 ];
 
+/** Pipeline steps in order, each with a plain-language explanation. */
+const PHASE_STEPS: Array<{ id: string; label: string; blurb: string }> = [
+  { id: "recon", label: "Understand", blurb: "Mapping your codebase — files, languages, entry points." },
+  { id: "diagnosis", label: "Diagnose", blurb: "Detection agents are hunting for issues and risks." },
+  { id: "riskAssessment", label: "Assess", blurb: "Scoring every finding for risk before anything is proposed." },
+  { id: "synthesis", label: "Backlog", blurb: "Merging findings into one deduplicated change backlog." },
+  { id: "minimality", label: "Minimize", blurb: "Shrinking the plan to the smallest safe set of changes." },
+  { id: "awaitingApproval", label: "Your approval", blurb: "Waiting for you — review the backlog. Nothing is changed yet." },
+  { id: "harness", label: "Safety net", blurb: "Building tests that pin current behavior before any edit." },
+  { id: "execution", label: "Transform", blurb: "Applying approved changes in a firewalled worktree, one at a time." },
+  { id: "report", label: "Explain", blurb: "Writing the final report: what changed, what didn't, why." },
+];
+
+function PhaseStepper({ phase, status }: { phase: string; status: string }) {
+  const stepIndex = PHASE_STEPS.findIndex((s) => s.id === phase);
+  const done = status === "completed";
+  const current = done ? PHASE_STEPS.length - 1 : stepIndex;
+  const blurb =
+    status === "completed"
+      ? "Run finished — see the Report tab for what changed and why."
+      : phase === "init"
+        ? "Starting up — preparing the run workspace."
+        : (current >= 0 && PHASE_STEPS[current]?.blurb) || "Working…";
+  return (
+    <div className="flex items-center gap-3 border-b border-slate-800 bg-ink-950/60 px-4 py-1.5">
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        {PHASE_STEPS.map((step, i) => {
+          const state = done || i < current ? "done" : i === current ? "active" : "todo";
+          return (
+            <div key={step.id} className="flex shrink-0 items-center gap-1">
+              {i > 0 && <span className={`text-[9px] ${state === "todo" ? "text-slate-700" : "text-slate-600"}`}>→</span>}
+              <span
+                className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                  state === "active"
+                    ? phase === "awaitingApproval"
+                      ? "bg-violet-900/70 text-violet-200"
+                      : "bg-sky-900/70 text-sky-200"
+                    : state === "done"
+                      ? "bg-emerald-950/60 text-emerald-400/90"
+                      : "text-slate-600"
+                }`}
+                title={step.blurb}
+              >
+                {state === "done" ? "✓" : state === "active" ? (status === "awaitingApproval" ? "●" : <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />) : i + 1}
+                {step.label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="hidden shrink-0 text-[10px] text-slate-500 lg:block">{blurb}</p>
+    </div>
+  );
+}
+
 function RunScreen({
   repoPath,
   runId,
@@ -401,7 +488,19 @@ function RunScreen({
   const { data: config } = useQuery({ queryKey: ["config", repoPath], queryFn: () => api.config(repoPath) });
   const [view, setView] = useState<View>("overview");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [streamWidth, setStreamWidth] = useState(() => {
+    const v = Number(localStorage.getItem("vibefix.streamWidth"));
+    return Number.isFinite(v) && v >= 280 && v <= 1100 ? v : 340;
+  });
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("vibefix.streamWidth", String(streamWidth));
+    } catch {
+      // private mode etc.
+    }
+  }, [streamWidth]);
 
   useEffect(() => {
     connect(runId);
@@ -435,10 +534,11 @@ function RunScreen({
     window.location.reload();
   };
 
-  const autoView: View | null =
-    phase === "awaitingApproval" ? "checkpoint" : phase === "execution" || phase === "harness" ? "execution" : phase === "report" || phase === "completed" ? "report" : null;
   const activeView = view;
-  const banner = phase === "awaitingApproval";
+  // Only the checkpoint genuinely needs the user. Harness/execution/report
+  // run on their own after approval — a button there would imply action is
+  // required when it isn't (that was the post-approve confusion).
+  const actionNeeded = phase === "awaitingApproval" && status === "awaitingApproval";
 
   return (
     <div className="flex h-screen flex-col">
@@ -451,7 +551,7 @@ function RunScreen({
             {repoPath}
           </code>
           <span
-            className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
+            className={`flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
               status === "awaitingApproval"
                 ? "bg-violet-900/60 text-violet-300"
                 : status === "completed"
@@ -461,11 +561,12 @@ function RunScreen({
                     : "bg-sky-900/60 text-sky-300"
             }`}
           >
+            {status === "running" && <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-300" />}
             {phase} · {status}
           </span>
-          {autoView && autoView !== activeView && (
-            <button onClick={() => setView(autoView)} className="rounded bg-violet-800 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-violet-700">
-              action needed → {autoView}
+          {actionNeeded && activeView !== "checkpoint" && (
+            <button onClick={() => setView("checkpoint")} className="animate-pulse rounded bg-violet-700 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-violet-600">
+              ● action needed → review &amp; approve
             </button>
           )}
         </div>
@@ -491,17 +592,19 @@ function RunScreen({
           ⚠ {runState.error}
         </div>
       )}
-      {banner && (
+      {actionNeeded && (
         <div className="border-b border-violet-900 bg-violet-950/40 px-4 py-1.5 text-xs text-violet-300">
           Checkpoint: review the backlog before any code is touched — VibeFix never changes your codebase without your approval.
         </div>
       )}
 
+      <PhaseStepper phase={phase} status={status} />
+
       <div className="flex flex-1 overflow-hidden">
         {/* Organized step navigation */}
         <nav className="flex w-44 shrink-0 flex-col border-r border-slate-800 bg-ink-900 p-2">
           {NAV.map((item) => {
-            const highlight = autoView === item.id;
+            const highlight = actionNeeded && item.id === "checkpoint";
             return (
               <button
                 key={item.id}
@@ -525,7 +628,10 @@ function RunScreen({
           </div>
         </nav>
 
-        <main className="relative grid flex-1 grid-cols-[1fr_340px] gap-3 overflow-hidden p-3">
+        <main
+          className="relative grid flex-1 gap-3 overflow-hidden p-3"
+          style={{ gridTemplateColumns: `1fr ${streamWidth}px` }}
+        >
           <div className="min-h-0 overflow-hidden">
             {activeView === "overview" && (
               <div className="flex h-full flex-col overflow-hidden rounded-lg border border-slate-800 bg-ink-900">
@@ -557,7 +663,15 @@ function RunScreen({
             {activeView === "codebase" && <CodebasePanel repoPath={repoPath} runId={runId} />}
             {activeView === "findings" && <FindingsPanel runId={runId} />}
             {activeView === "checkpoint" && (
-              <CheckpointPanel runId={runId} onDone={() => void queryClient.invalidateQueries()} />
+              <CheckpointPanel
+                runId={runId}
+                onDone={(outcome) => {
+                  void queryClient.invalidateQueries();
+                  // Guide the user to what happens next instead of leaving
+                  // them staring at a settled checkpoint.
+                  setView(outcome === "approved" ? "execution" : "report");
+                }}
+              />
             )}
             {activeView === "execution" && <ExecutionPanel runId={runId} />}
             {activeView === "report" && <ReportPanel runId={runId} />}
@@ -575,7 +689,7 @@ function RunScreen({
               <SettingsPanel repoPath={repoPath} agents={agents} onClose={() => setView("overview")} />
             )}
           </div>
-          <EventStream />
+          <EventStream width={streamWidth} onWidthChange={setStreamWidth} />
         </main>
       </div>
     </div>

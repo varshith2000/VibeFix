@@ -17,6 +17,10 @@ export async function decide(
 ): Promise<{ answers: DecisionAnswer[]; degraded: boolean }> {
   if (ctx.decision) {
     try {
+      // Surface the provider while the call is in flight — decision calls can
+      // take seconds, and "which model is thinking?" is the first question a
+      // user watching the event stream asks.
+      await ctx.progress(`deciding via ${ctx.decision.providerId} (${ctx.decision.model})`);
       const result = await ctx.decision.decide({
         ...request,
         metadata: { agentId: ctx.def.agentId, step: "decide" },

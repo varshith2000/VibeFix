@@ -14,7 +14,10 @@ export async function enrich<T>(
   try {
     // Optimize token usage by using lower default maxTokens for most operations
     const optimizedMaxTokens = Math.min(input.maxTokens ?? 1_024, 2_048);
-    
+    // Say which model is generating — the call can take seconds and the event
+    // stream should show live intent, not silence.
+    await ctx.progress(`generating via ${ctx.llm.providerId} (${ctx.llm.model})`);
+
     const result = await ctx.llm.complete<T>({
       system: input.system,
       messages: [{ role: "user", content: input.prompt }],

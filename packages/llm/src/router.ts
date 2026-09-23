@@ -15,6 +15,7 @@ import { LlmError } from "./errors.js";
 import { AnthropicClient } from "./providers/anthropic.js";
 import { OpenAiClient } from "./providers/openai.js";
 import { GeminiClient } from "./providers/gemini.js";
+import { GeminiDecisionClient } from "./providers/gemini-decision.js";
 import { OllamaClient } from "./providers/ollama.js";
 import { JevClient } from "./providers/jev.js";
 import { OpenRouterDecisionClient } from "./providers/openrouter.js";
@@ -45,6 +46,8 @@ function buildProvider(
       return new OpenAiClient(config, key ?? "");
     case "gemini":
       return new GeminiClient(config, key ?? "");
+    case "gemini-decision":
+      return new GeminiDecisionClient(config, key ?? "");
     case "ollama":
       return new OllamaClient(config);
     case "jev":

@@ -249,23 +249,6 @@ export function reduce(
       effects.push({ effect: "CleanupWorktrees" });
       break;
     }
-
-    case "SKIP_TO_REPORT": {
-      // Skip remaining analysis phases and go straight to report
-      next.status = "running";
-      next.phase = "report";
-      next.error = null; // Clear any previous errors
-      effects.push({ effect: "EmitEvent", type: "run.nochanges", message: event.reason });
-      effects.push({ effect: "EmitEvent", type: "phase.entered", message: "report" });
-      
-      // Invoke the docent/report agent
-      const docent = registry.agentIdByPhase("report");
-      if (docent) {
-        next.agentStates[docent] = "queued";
-        effects.push({ effect: "InvokeAgent", agentId: docent });
-      }
-      break;
-    }
   }
 
   return { state: next, effects };

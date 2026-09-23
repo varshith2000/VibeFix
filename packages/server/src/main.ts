@@ -9,7 +9,7 @@ const HOST = process.env.VIBEFIX_HOST ?? "127.0.0.1";
 
 export async function main(): Promise<void> {
   const registry = new ProjectRegistry();
-  const app = buildApp(registry);
+  const app = await buildApp(registry);
   try {
     await app.listen({ port: PORT, host: HOST });
     console.log(`VibeFix control plane listening on http://${HOST}:${PORT}`);

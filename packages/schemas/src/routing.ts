@@ -5,6 +5,7 @@ export const ProviderAdapterSchema = z.enum([
   "anthropic",
   "openai",
   "gemini",
+  "gemini-decision",
   "ollama",
   "jev",
   "openrouter",
@@ -111,16 +112,31 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       enabled: false,
     },
     {
-      providerId: "openrouter",
+      // Typed decisions straight against Google's API — no OpenRouter
+      // middleman for the small, frequent decision calls (risk scores,
+      // verdicts, ranking). Same key as the text route above.
+      providerId: "gemini-decision",
       kind: "TypedDecision",
-      adapter: "openrouter",
-      apiKeyEnv: "OPENROUTER_API_KEY",
-      // Use a reliable OpenRouter model for decision tasks
-      defaultModel: "google/gemini-2.5-flash",
+      adapter: "gemini-decision",
+      apiKeyEnv: "GEMINI_API_KEY",
+      defaultModel: "gemini-2.5-flash",
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 2_048,
       pricePerMTokInput: 0.075,
       pricePerMTokOutput: 0.3,
+      enabled: true,
+    },
+    {
+      // Free OpenRouter model — the cost-zero fallback when direct Gemini
+      // is down/overloaded. :free models are rate-limited, which is fine for
+      // a fallback that should rarely carry traffic.
+      providerId: "openrouter",
+      kind: "TypedDecision",
+      adapter: "openrouter",
+      apiKeyEnv: "OPENROUTER_API_KEY",
+      defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
+      contextWindowTokens: 131_072,
+      maxOutputTokens: 2_048,
       enabled: true,
     },
     {
@@ -157,14 +173,14 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
     "arch-auditor": { providerId: "gemini", fallbackProviderId: "openrouter-text" },
     "consistency-sentinel": { providerId: "gemini", fallbackProviderId: "openrouter-text" },
     "security-agent": { providerId: "gemini", fallbackProviderId: "openrouter-text" },
-    "risk-assessor": { providerId: "jev", fallbackProviderId: "openrouter" },
-    synthesis: { providerId: "jev", fallbackProviderId: "openrouter" },
-    minimality: { providerId: "jev", fallbackProviderId: "openrouter" },
+    "risk-assessor": { providerId: "gemini-decision", fallbackProviderId: "openrouter" },
+    synthesis: { providerId: "gemini-decision", fallbackProviderId: "openrouter" },
+    minimality: { providerId: "gemini-decision", fallbackProviderId: "openrouter" },
     "harness-builder": { providerId: "gemini", fallbackProviderId: "openrouter-text" },
     engineer: { providerId: "gemini", fallbackProviderId: "openrouter-text" },
-    verifier: { providerId: "jev", fallbackProviderId: "openrouter" },
-    "principle-reviewer": { providerId: "jev", fallbackProviderId: "openrouter" },
-    "regression-sentinel": { providerId: "jev", fallbackProviderId: "openrouter" },
+    verifier: { providerId: "gemini-decision", fallbackProviderId: "openrouter" },
+    "principle-reviewer": { providerId: "gemini-decision", fallbackProviderId: "openrouter" },
+    "regression-sentinel": { providerId: "gemini-decision", fallbackProviderId: "openrouter" },
     docent: { providerId: "gemini", fallbackProviderId: "openrouter-text" },
   },
   budgets: {

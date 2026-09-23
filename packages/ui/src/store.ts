@@ -147,15 +147,32 @@ export const useRunStore = create<RunStore>((set, get) => ({
     ) {
       const currentState = get().runState;
       if (currentState) {
+        let next: RunState = currentState;
         if (event.type === "agent.started" && event.agentId) {
-          set({ runState: { ...currentState, agentStates: { ...currentState.agentStates, [event.agentId]: "running" } } });
+          next = { ...next, agentStates: { ...next.agentStates, [event.agentId]: "running" } };
         } else if (event.type === "agent.completed" && event.agentId) {
-          set({ runState: { ...currentState, agentStates: { ...currentState.agentStates, [event.agentId]: "passed" } } });
+          next = { ...next, agentStates: { ...next.agentStates, [event.agentId]: "passed" } };
         } else if ((event.type === "agent.failed" || event.type === "agent.rejected") && event.agentId) {
-          set({ runState: { ...currentState, agentStates: { ...currentState.agentStates, [event.agentId]: event.type === "agent.failed" ? "failed" : "rejected" } } });
-        } else if (event.type.startsWith("phase.")) {
-          set({ runState: { ...currentState, phase: event.type === "phase.entered" ? (event.message as RunState["phase"]) : currentState.phase } });
+          next = { ...next, agentStates: { ...next.agentStates, [event.agentId]: event.type === "agent.failed" ? "failed" : "rejected" } };
         }
+        if (event.type === "phase.entered") {
+          next = { ...next, phase: event.message as RunState["phase"] };
+        }
+        // Status transitions — applied the moment the event lands so the
+        // header never shows a stale "awaitingApproval" after the user clicks
+        // Approve (the authoritative snapshot follows within ms).
+        if (event.type === "checkpoint.awaitingApproval") {
+          next = { ...next, status: "awaitingApproval", phase: "awaitingApproval" };
+        } else if (event.type === "checkpoint.approved") {
+          next = { ...next, status: "running" };
+        } else if (event.type === "run.completed" || event.type === "run.nochanges") {
+          next = { ...next, status: "completed" };
+        } else if (event.type === "run.aborted") {
+          next = { ...next, status: "aborted" };
+        } else if (event.type === "run.failed") {
+          next = { ...next, status: "failed" };
+        }
+        if (next !== currentState) set({ runState: next });
       }
     }
   },

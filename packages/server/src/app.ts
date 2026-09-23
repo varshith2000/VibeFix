@@ -45,10 +45,15 @@ const SNAPSHOT_EVENTS = new Set([
   "run.failed",
 ]);
 
-export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {}) {
+export async function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {}) {
   const app = Fastify({ logger: { level: process.env.VIBEFIX_LOG ?? "info" } });
-  void app.register(websocket);
-  void app.register(cors, { origin: true });
+  // MUST be awaited BEFORE routes are defined: @fastify/websocket wraps
+  // `{ websocket: true }` route handlers in an onRoute hook. Fire-and-forget
+  // registration leaves /ws a plain GET route — the handler then receives
+  // (request, reply) instead of (socket, request) and every WS upgrade dies
+  // with "socket.close is not a function" + HTTP 500.
+  await app.register(websocket);
+  await app.register(cors, { origin: true });
 
   void options;
 
@@ -149,14 +154,34 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
   });
 
   // ---------- local folder picker ----------
+
+  /** Windows drive roots (C:\ … Z:\) that actually exist. Cheap probe. */
+  const listDrives = async (): Promise<string[]> => {
+    if (process.platform !== "win32") return [];
+    const drives: string[] = [];
+    for (let code = 67; code <= 90; code++) {
+      const root = `${String.fromCharCode(code)}:\\`;
+      try {
+        await fs.access(root);
+        drives.push(root);
+      } catch {
+        // drive not present
+      }
+    }
+    return drives;
+  };
+
   app.get("/api/fs/browse", async (req) => {
     const requested = (req.query as { path?: string }).path;
     const dir = requested && requested.trim().length > 0 ? path.resolve(requested) : homedir();
+    // On Windows a drive root's dirname is itself, so "up" can never cross
+    // drives — return the drive list so the picker can jump between them.
+    const drives = await listDrives();
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
-      return { path: dir, parent: path.dirname(dir), dirs: [], error: "cannot read this location" };
+      return { path: dir, parent: path.dirname(dir), dirs: [], gitDirs: [], drives, error: "cannot read this location" };
     }
     const dirs = entries
       .filter(
@@ -167,7 +192,20 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
       )
       .map((e) => e.name)
       .sort();
-    return { path: dir, parent: path.dirname(dir) === dir ? null : path.dirname(dir), dirs };
+    // Flag git repos so the picker can show which folders are openable —
+    // VibeFix refuses non-git folders ("needs git for worktrees").
+    const gitDirs = new Set<string>();
+    await Promise.all(
+      dirs.map(async (name) => {
+        try {
+          await fs.access(path.join(dir, name, ".git"));
+          gitDirs.add(name);
+        } catch {
+          // not a repo
+        }
+      }),
+    );
+    return { path: dir, parent: path.dirname(dir) === dir ? null : path.dirname(dir), dirs, gitDirs: [...gitDirs], drives };
   });
 
   // ---------- repo codebase viewer ----------
@@ -515,7 +553,7 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(data));
     };
     if (!runId) {
-      socket.close(4000, "runId required");
+      socket.close?.(4000, "runId required");
       return;
     }
     const entry = registry.runtime(runId);
