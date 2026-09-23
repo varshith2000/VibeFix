@@ -24,6 +24,8 @@ export type RunEvent =
   | { type: "GATE_VERDICT"; proposalId: string; verdict: "passed" | "rejected"; reason?: string }
   | { type: "ABORT" }
   | { type: "BUDGET_EXCEEDED" }
+  /** Analysis found nothing worth changing — skip remaining analysis agents, report, complete. */
+  | { type: "SKIP_TO_REPORT"; reason: string }
   | { type: "FATAL"; message: string };
 
 /** Effects the runtime performs. The reducer never does I/O itself. */

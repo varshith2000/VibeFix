@@ -34,21 +34,46 @@ export class AnthropicClient implements TextGenerationClient {
     options: CompleteOptions & { responseSchema?: z.ZodType<T> },
   ): Promise<CompleteResult<T>> {
     const system = this.buildSystem(options);
-    const res = await postJson<AnthropicResponse>({
-      url: `${this.config.baseUrl ?? "https://api.anthropic.com"}/v1/messages`,
-      headers: {
-        "x-api-key": this.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: {
-        model: this.model,
-        max_tokens: options.maxTokens ?? this.config.maxOutputTokens,
-        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-        ...(system ? { system } : {}),
-        messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
-      },
-      signal: options.signal,
-    });
+    
+    // Check if this is a newer Claude model that doesn't support temperature
+    const isNewerClaude = this.model.startsWith("claude-3.7") || 
+                         this.model.startsWith("claude-3.5") ||
+                         this.model.startsWith("claude-3-");
+    
+    const body: Record<string, unknown> = {
+      model: this.model,
+      max_tokens: options.maxTokens ?? this.config.maxOutputTokens,
+      // Only include temperature for older models that support it
+      ...(!isNewerClaude && options.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(system ? { system } : {}),
+      messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
+    };
+    
+    const url = `${this.config.baseUrl ?? "https://api.anthropic.com"}/v1/messages`;
+    const headers = {
+      "x-api-key": this.apiKey,
+      "anthropic-version": "2023-06-01",
+    };
+    
+    let res: AnthropicResponse;
+    try {
+      res = await postJson<AnthropicResponse>({ url, headers, body, signal: options.signal });
+    } catch (err) {
+      // Newer Claude models reject `temperature` outright (HTTP 400
+      // "`temperature` is deprecated for this model."). Drop it and retry
+      // once rather than failing the whole agent call.
+      if (
+        body.temperature !== undefined &&
+        err instanceof LlmError &&
+        err.status === 400 &&
+        /temperature/i.test(err.message)
+      ) {
+        delete body.temperature;
+        res = await postJson<AnthropicResponse>({ url, headers, body, signal: options.signal });
+      } else {
+        throw err;
+      }
+    }
 
     const text = (res.content ?? [])
       .filter((c) => c.type === "text")

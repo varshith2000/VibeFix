@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import {
   BacklogArtifactSchema,
+  FindingsArtifactSchema,
   RiskAssessmentsArtifactSchema,
   type AgentDefinition,
   type Budgets,
@@ -197,7 +198,40 @@ export class OrchestratorRuntime {
           }),
       ),
     );
+    if (pool === "diagnosis" && (await this.countFindings()) === 0) {
+      // Nothing was found — risk assessor, synthesis, minimality and the
+      // checkpoint would all no-op. Skip straight to the report.
+      await this.dispatch({
+        type: "SKIP_TO_REPORT",
+        reason: "diagnosis produced 0 findings — nothing to change in this codebase",
+      });
+      return;
+    }
     await this.dispatch({ type: "PHASE_COMPLETED", phase });
+  }
+
+  /** Total findings across every diagnosis agent's artifacts. */
+  private async countFindings(): Promise<number> {
+    let n = 0;
+    for (const artifact of await this.deps.store.list(undefined, "findings")) {
+      try {
+        n += FindingsArtifactSchema.parse(artifact.data).findings.length;
+      } catch {
+        // malformed artifact — contributes nothing
+      }
+    }
+    return n;
+  }
+
+  /** Proposals in the latest backlog artifact; null when unreadable/absent. */
+  private async backlogSize(): Promise<number | null> {
+    const artifact = await this.deps.store.latest("backlog");
+    if (!artifact) return null;
+    try {
+      return BacklogArtifactSchema.parse(artifact.data).proposals.length;
+    } catch {
+      return null;
+    }
   }
 
   private async runSequentialAgent(agentId: string): Promise<void> {
@@ -205,6 +239,15 @@ export class OrchestratorRuntime {
     const input: AgentExecutionInput = { runState: this.snapshot() };
     await this.runAgentGuarded(agentId, input);
     const phase = def.phase;
+    if (phase === "synthesis" && (await this.backlogSize()) === 0) {
+      // Findings existed but none survived into a proposal — minimality and
+      // the checkpoint have an empty backlog. Skip to the report.
+      await this.dispatch({
+        type: "SKIP_TO_REPORT",
+        reason: "synthesis produced 0 proposals — nothing to change in this codebase",
+      });
+      return;
+    }
     if (phase === "riskAssessment" || phase === "synthesis" || phase === "minimality" || phase === "harness" || phase === "report") {
       await this.dispatch({ type: "PHASE_COMPLETED", phase });
     }

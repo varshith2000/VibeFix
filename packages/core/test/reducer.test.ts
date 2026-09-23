@@ -191,3 +191,41 @@ describe("reducer transition table", () => {
     expect(after.state.budget.changesCommitted).toBe(1);
   });
 });
+
+describe("SKIP_TO_REPORT (no changes worth making)", () => {
+  it("skips remaining analysis agents and invokes docent when diagnosis found nothing", () => {
+    const state = drive(makeState(), [
+      { type: "START" },
+      { type: "PHASE_COMPLETED", phase: "recon" },
+      // diagnosis agents finish; runtime sees 0 findings and skips instead
+      { type: "SKIP_TO_REPORT", reason: "diagnosis produced 0 findings" },
+    ]);
+    expect(state.phase).toBe("report");
+    expect(state.status).toBe("running");
+    expect(state.agentStates["risk-assessor"]).toBe("skipped");
+    expect(state.agentStates["synthesis"]).toBe("skipped");
+    expect(state.agentStates["minimality"]).toBe("skipped");
+    expect(state.agentStates["docent"]).toBe("queued");
+    // diagnosis agents that already ran keep their terminal states
+    expect(["passed", "skipped"]).toContain(state.agentStates["smell-detector"]);
+  });
+
+  it("is ignored once the run is past analysis (e.g. already awaitingApproval)", () => {
+    const before = toAwaitingApproval();
+    const after = reduce(before, { type: "SKIP_TO_REPORT", reason: "late" }, registry, budgets).state;
+    expect(after.phase).toBe("awaitingApproval");
+    expect(after.agentStates["minimality"]).not.toBe("skipped");
+  });
+
+  it("completes the run without docent when no report agent is registered", () => {
+    const noDocent: AgentRegistrySnapshot = { ...registry, agentIdByPhase: () => null };
+    const atRisk = drive(makeState(), [
+      { type: "START" },
+      { type: "PHASE_COMPLETED", phase: "recon" },
+      { type: "PHASE_COMPLETED", phase: "diagnosis" },
+    ]);
+    const after = reduce(atRisk, { type: "SKIP_TO_REPORT", reason: "0 findings" }, noDocent, budgets).state;
+    expect(after.phase).toBe("completed");
+    expect(after.status).toBe("completed");
+  });
+});

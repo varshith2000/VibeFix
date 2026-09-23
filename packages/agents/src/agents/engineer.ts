@@ -164,7 +164,6 @@ export class RefactoringEngineer implements VibeFixAgent {
               ],
               responseSchema: EditsSchema as z.ZodType<EditsPlan>,
               maxTokens: 16_384,
-              temperature: 0,
               metadata: { agentId: ctx.def.agentId, step: "implement" },
             });
             // .default()/.catch() make the schema's input type looser than its

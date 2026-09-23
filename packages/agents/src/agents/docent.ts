@@ -118,22 +118,28 @@ export class Docent implements VibeFixAgent {
         totals,
       };
 
-      const polished = await enrich(ctx, {
-        system:
-          "You are the Docent. Rewrite the report narrative sections for a developer who wants to LEARN " +
-          "what happened to their codebase. Ground every claim in the given facts; keep IDs and numbers exactly as given.",
-        prompt: JSON.stringify({
-          stateOfCodebase: deterministic.stateOfCodebase,
-          existingArchitecture: deterministic.existingArchitecture,
-          learningSummary: deterministic.learningSummary,
-        }),
-        schema: z.object({
-          stateOfCodebase: z.string(),
-          existingArchitecture: z.string().optional(),
-          learningSummary: z.string(),
-        }),
-        maxTokens: 2_500,
-      });
+      // Token frugality: when nothing was proposed or committed there is no
+      // narrative worth polishing — the deterministic report already says it.
+      const anyChanges =
+        (backlogData?.proposals.length ?? 0) > 0 || committed.length > 0;
+      const polished = anyChanges
+        ? await enrich(ctx, {
+            system:
+              "You are the Docent. Rewrite the report narrative sections for a developer who wants to LEARN " +
+              "what happened to their codebase. Ground every claim in the given facts; keep IDs and numbers exactly as given. Be concise.",
+            prompt: JSON.stringify({
+              stateOfCodebase: deterministic.stateOfCodebase,
+              existingArchitecture: deterministic.existingArchitecture,
+              learningSummary: deterministic.learningSummary,
+            }),
+            schema: z.object({
+              stateOfCodebase: z.string(),
+              existingArchitecture: z.string().optional(),
+              learningSummary: z.string(),
+            }),
+            maxTokens: 1_500, // Reduced from 2_500 for token optimization
+          })
+        : undefined;
       if (polished) {
         deterministic.stateOfCodebase = polished.stateOfCodebase;
         if (polished.existingArchitecture) deterministic.existingArchitecture = polished.existingArchitecture;

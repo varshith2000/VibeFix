@@ -29,19 +29,31 @@ export class OpenAiClient implements TextGenerationClient {
   async complete<T = unknown>(
     options: CompleteOptions & { responseSchema?: z.ZodType<T> },
   ): Promise<CompleteResult<T>> {
+    // Check if this is a newer OpenAI model that uses max_completion_tokens
+    const isNewerOpenAI = this.model.startsWith("gpt-4.1") || 
+                         this.model.startsWith("gpt-4o") ||
+                         this.model.startsWith("o1") ||
+                         this.model.startsWith("o3");
+    
+    const body: Record<string, unknown> = {
+      model: this.model,
+      // Use max_completion_tokens for newer models, max_tokens for older ones
+      ...(isNewerOpenAI 
+        ? { max_completion_tokens: options.maxTokens ?? this.config.maxOutputTokens }
+        : { max_tokens: options.maxTokens ?? this.config.maxOutputTokens }
+      ),
+      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+      messages: [
+        ...(options.system ? [{ role: "system", content: options.system }] : []),
+        ...options.messages.map((m) => ({ role: m.role, content: m.content })),
+      ],
+      ...(options.responseSchema ? { response_format: { type: "json_object" } } : {}),
+    };
+    
     const res = await postJson<OpenAiResponse>({
       url: `${this.config.baseUrl ?? "https://api.openai.com"}/v1/chat/completions`,
       headers: { authorization: `Bearer ${this.apiKey}` },
-      body: {
-        model: this.model,
-        max_completion_tokens: options.maxTokens ?? this.config.maxOutputTokens,
-        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-        messages: [
-          ...(options.system ? [{ role: "system", content: options.system }] : []),
-          ...options.messages.map((m) => ({ role: m.role, content: m.content })),
-        ],
-        ...(options.responseSchema ? { response_format: { type: "json_object" } } : {}),
-      },
+      body,
       signal: options.signal,
     });
 

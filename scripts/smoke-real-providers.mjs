@@ -37,7 +37,39 @@ const d = await decision.decide({
     { type: "score", question: "Score refactor risk", items: ["foo"], scale: { min: 1, max: 10 }, rubric: "10 = catastrophic" },
   ],
 });
-console.log("openrouter decision ->", JSON.stringify(d.answers), `(${d.usage.totalTokens} tokens)`);
+console.log("jev decision (primary) ->", JSON.stringify(d.answers), `(${d.usage.totalTokens} tokens)`);
+
+// Decision fallback (openrouter) — used when Jev is unavailable.
+const { OpenRouterDecisionClient } = await import("../packages/llm/dist/providers/openrouter.js");
+const ord = new OpenRouterDecisionClient(
+  config.routing.providers.find((p) => p.providerId === "openrouter"),
+  process.env.OPENROUTER_API_KEY,
+);
+const ordResult = await ord.decide({
+  context: "Function foo (400 lines, cyclomatic 31) has zero test coverage and is called from 6 modules.",
+  questions: [
+    { type: "choice", question: "Approve refactor proposal?", choices: ["approve", "revise", "reject"], rubric: "reject if risk is unmanaged" },
+  ],
+});
+console.log("openrouter decision (fallback) ->", JSON.stringify(ordResult.answers), `(${ordResult.usage.totalTokens} tokens)`);
+
+// Anthropic with an explicit temperature — verifies the adapter survives the
+// "`temperature` is deprecated for this model." 400 by retrying without it.
+if (process.env.ANTHROPIC_API_KEY) {
+  const { AnthropicClient } = await import("../packages/llm/dist/providers/anthropic.js");
+  const anthropic = new AnthropicClient(
+    { ...config.routing.providers.find((p) => p.providerId === "anthropic"), enabled: true },
+    process.env.ANTHROPIC_API_KEY,
+  );
+  const a = await anthropic.complete({
+    system: "Reply JSON only.",
+    messages: [{ role: "user", content: 'Reply {"ok":true,"note":"temperature tolerated"}' }],
+    responseSchema: z.object({ ok: z.boolean(), note: z.string() }),
+    maxTokens: 512,
+    temperature: 0.2,
+  });
+  console.log("anthropic (temperature 400 self-heal) ->", JSON.stringify(a.structured));
+}
 
 // Text fallback (openrouter-text) — what the engineer chain uses when Gemini is down.
 const { OpenRouterTextClient } = await import("../packages/llm/dist/index.js");
@@ -52,4 +84,4 @@ const ortResult = await ort.complete({
   maxTokens: 2048,
 });
 console.log("openrouter-text fallback ->", JSON.stringify(ortResult.structured));
-console.log("SMOKE OK: real providers responding (gemini + openrouter decision + openrouter-text fallback)");
+console.log("SMOKE OK: real providers responding (gemini + jev decision + openrouter fallback + openrouter-text + anthropic)");

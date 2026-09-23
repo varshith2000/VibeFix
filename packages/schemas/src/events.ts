@@ -15,6 +15,7 @@ export const AgentExecutionEventTypeSchema = z.enum([
   "ledger.updated",
   "budget.warning",
   "run.aborted",
+  "run.nochanges",
   "run.completed",
   "run.failed",
   "log",

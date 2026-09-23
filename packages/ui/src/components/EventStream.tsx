@@ -15,6 +15,7 @@ const TYPE_COLOR: Record<string, string> = {
   "ledger.updated": "text-slate-300",
   "budget.warning": "text-yellow-400",
   "run.completed": "text-emerald-400 font-semibold",
+  "run.nochanges": "text-sky-400 font-semibold",
   "run.aborted": "text-red-400 font-semibold",
   "run.failed": "text-red-400 font-semibold",
 };

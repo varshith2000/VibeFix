@@ -40,6 +40,7 @@ const SNAPSHOT_EVENTS = new Set([
   "proposal.verdict",
   "ledger.updated",
   "run.aborted",
+  "run.nochanges",
   "run.completed",
   "run.failed",
 ]);

@@ -12,19 +12,22 @@ export async function enrich<T>(
 ): Promise<T | undefined> {
   if (!ctx.llm) return undefined;
   try {
+    // Optimize token usage by using lower default maxTokens for most operations
+    const optimizedMaxTokens = Math.min(input.maxTokens ?? 1_024, 2_048);
+    
     const result = await ctx.llm.complete<T>({
       system: input.system,
       messages: [{ role: "user", content: input.prompt }],
       responseSchema: input.schema,
-      maxTokens: input.maxTokens ?? 2_048,
-      temperature: 0.2,
+      maxTokens: optimizedMaxTokens,
       metadata: { agentId: ctx.def.agentId },
     });
     return result.structured;
   } catch (err) {
     // Graceful degradation, but LOUD: a silently dead provider is what makes
     // runs look like demo data. Record the failure in the run's event log.
-    await ctx.progress("llm enrichment failed — using deterministic content", String(err).slice(0, 300));
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    await ctx.progress("llm enrichment failed — using deterministic content", errorMessage.slice(0, 300));
     return undefined;
   }
 }

@@ -12,35 +12,60 @@ import { postJson } from "./http.js";
 /**
  * Jev (TypeSafe AI) adapter — the native TypedDecision provider.
  *
- * Wire contract (documented seam — enable once keys ship from the waitlist):
- *   POST {baseUrl}/v1/decisions
+ * Real wire contract (docs.typesafe.ai):
+ *   POST {baseUrl}/v1/systemone
  *   Authorization: Bearer <key>
  *   {
  *     "model": "jev-latest",
- *     "context": "<evidence text>",
- *     "questions": [
- *       { "type": "choice", "question": "...", "choices": ["a","b"], "allowNoul": true },
- *       { "type": "score",  "question": "...", "items": ["x","y"], "scale": {"min":0,"max":100} }
- *     ]
+ *     "state": "<evidence text>",
+ *     "questions": {
+ *       "<id>": { "type": "choice", "instructions": "...",
+ *                 "criteria": { "label": "description", ... } },
+ *       "<id>": { "type": "score", "instructions": "...",
+ *                 "criteria": ["level 0 desc", "level 1 desc", ...] }
+ *     }
  *   }
  * Response:
- *   { "answers": [ {"kind":"choice","choice":"a","confidence":0.82,"rationale":"..."}
- *                | {"kind":"score","scores":[12,88]}
- *                | {"kind":"noul","reason":"..."} ],
- *     "usage": {"inputTokens":n,"outputTokens":n} }
+ *   { "model": "jev-1.x.y",
+ *     "answers": { "<id>": { "type": "choice", "choice": "label",
+ *                            "confidence": 0.78, "probabilities": {...} }
+ *                          | { "type": "score", "score": 1.0, "confidence": 1.0,
+ *                              "legend": {...}, "probabilities": {...} }
+ *                          | { "type": "noul", "noul": 1.0 } },
+ *     "usage": { "input_tokens": n, "output_tokens": n } }
+ *
+ * Jev's score answers are an INDEX into the criteria levels, so numeric scales
+ * (e.g. 0–100 risk) are encoded as discrete levels and decoded back to values.
+ * One internal score question over N items becomes N Jev questions
+ * (`q<i>_i<j>`), one per item.
  */
 interface JevWireAnswer {
-  kind?: string;
+  type?: string;
   choice?: string;
-  scores?: number[];
+  score?: number;
   confidence?: number;
-  rationale?: string;
-  reason?: string;
 }
 
 interface JevWireResponse {
-  answers?: JevWireAnswer[];
-  usage?: { inputTokens?: number; outputTokens?: number };
+  answers?: Record<string, JevWireAnswer>;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+/** Discrete level values for a numeric scale (≤11 levels keeps answers cheap). */
+function scaleLevels(scale: { min: number; max: number }): number[] {
+  const span = scale.max - scale.min;
+  if (span <= 10) {
+    return Array.from({ length: span + 1 }, (_, i) => scale.min + i);
+  }
+  return Array.from({ length: 11 }, (_, i) =>
+    Math.round(scale.min + (span * i) / 10),
+  );
+}
+
+interface WireQuestion {
+  type: "choice" | "score";
+  instructions: string;
+  criteria: Record<string, string> | string[];
 }
 
 export class JevClient implements TypedDecisionClient {
@@ -59,75 +84,110 @@ export class JevClient implements TypedDecisionClient {
   }
 
   async decide(request: DecisionRequest): Promise<DecisionResult> {
-    const res = await postJson<JevWireResponse>({
-      url: `${this.config.baseUrl ?? "https://api.typesafe.ai"}/v1/decisions`,
-      headers: { authorization: `Bearer ${this.apiKey}` },
-      body: {
-        model: this.model,
-        context: request.context,
-        questions: request.questions.map((q) =>
-          q.type === "choice"
-            ? {
-                type: "choice",
-                question: q.question,
-                choices: q.choices,
-                ...(q.rubric ? { rubric: q.rubric } : {}),
-                allowNoul: q.allowNoul ?? true,
-              }
-            : {
-                type: "score",
-                question: q.question,
-                items: q.items,
-                scale: q.scale,
-                rubric: q.rubric,
-              },
-        ),
-      },
-      signal: request.signal,
+    const questions: Record<string, WireQuestion> = {};
+    // Per-question decode info: which levels map back to numeric values.
+    const scoreLevels: Array<number[] | null> = [];
+
+    request.questions.forEach((q, qi) => {
+      if (q.type === "choice") {
+        questions[`q${qi}`] = {
+          type: "choice",
+          instructions:
+            q.question + (q.rubric ? `\nRubric: ${q.rubric}` : ""),
+          criteria: Object.fromEntries(q.choices.map((c) => [c, c])),
+        };
+        scoreLevels.push(null);
+        return;
+      }
+      const levels = scaleLevels(q.scale);
+      q.items.forEach((item, ii) => {
+        questions[`q${qi}_i${ii}`] = {
+          type: "score",
+          instructions:
+            `${q.question}\nItem: ${item}\nRubric: ${q.rubric}\n` +
+            `Pick the level (0–${levels.length - 1}) that matches this item.`,
+          criteria: levels.map((v) => `${v}`),
+        };
+      });
+      scoreLevels.push(levels);
     });
 
-    const answers: DecisionAnswer[] = (res.answers ?? []).map((a, i) => {
-      const q = request.questions[i];
-      if (!q) throw new LlmError("invalid-response", `extra answer at index ${i}`, this.providerId);
-      if (a.kind === "noul" || a.choice === undefined) {
-        return { questionIndex: i, kind: "noul", reason: a.reason ?? "no calibrated answer" };
-      }
-      if (q.type === "choice") {
+    let res: JevWireResponse;
+    try {
+      res = await postJson<JevWireResponse>({
+        url: `${this.config.baseUrl ?? "https://api.typesafe.ai"}/v1/systemone`,
+        headers: { authorization: `Bearer ${this.apiKey}` },
+        body: {
+          model: this.model,
+          state: request.context,
+          questions,
+        },
+        signal: request.signal,
+      });
+    } catch (err) {
+      // Enhanced error handling for Jev API failures
+      if (err instanceof LlmError) {
+        console.error(`[Jev] API error for model ${this.model}:`, err.message);
+        // Return NOUL answers for all questions if the API fails
         return {
-          questionIndex: i,
-          kind: "choice",
-          choice: a.choice,
-          ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
-          ...(a.rationale ? { rationale: a.rationale } : {}),
+          answers: request.questions.map((q, qi) => ({
+            questionIndex: qi,
+            kind: "noul",
+            reason: `Jev API error: ${err.message}`,
+          })),
+          usage: makeUsage(0, 0),
+          model: this.model,
+          providerId: this.providerId,
         };
       }
-      if (!Array.isArray(a.scores) || a.scores.length !== q.items.length) {
-        throw new LlmError(
-          "invalid-response",
-          `score answer length mismatch at index ${i}`,
-          this.providerId,
-        );
+      throw err;
+    }
+
+    const answers: DecisionAnswer[] = request.questions.map((q, qi) => {
+      if (q.type === "choice") {
+        const a = res.answers?.[`q${qi}`];
+        if (a?.type === "choice" && a.choice !== undefined && q.choices.includes(a.choice)) {
+          return {
+            questionIndex: qi,
+            kind: "choice",
+            choice: a.choice,
+            ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
+          };
+        }
+        return {
+          questionIndex: qi,
+          kind: "noul",
+          reason: a ? `unexpected answer shape (${a.type ?? "none"})` : "no answer returned",
+        };
+      }
+      // score: decode every item's level index back to a numeric value
+      const levels = scoreLevels[qi]!;
+      const scores: number[] = [];
+      let confidence: number | undefined;
+      for (let ii = 0; ii < q.items.length; ii++) {
+        const a = res.answers?.[`q${qi}_i${ii}`];
+        if (a?.type !== "score" || typeof a.score !== "number") {
+          return {
+            questionIndex: qi,
+            kind: "noul",
+            reason: `incomplete score answer for item ${ii} (${q.items[ii]})`,
+          } satisfies DecisionAnswer;
+        }
+        const idx = Math.max(0, Math.min(levels.length - 1, Math.round(a.score)));
+        scores.push(levels[idx]!);
+        if (a.confidence !== undefined) confidence = a.confidence;
       }
       return {
-        questionIndex: i,
+        questionIndex: qi,
         kind: "score",
-        scores: a.scores,
-        ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
-        ...(a.rationale ? { rationale: a.rationale } : {}),
+        scores,
+        ...(confidence !== undefined ? { confidence } : {}),
       };
     });
 
-    if (answers.length !== request.questions.length) {
-      throw new LlmError(
-        "invalid-response",
-        `expected ${request.questions.length} answers, got ${answers.length}`,
-        this.providerId,
-      );
-    }
-
     return {
       answers,
-      usage: makeUsage(res.usage?.inputTokens ?? 0, res.usage?.outputTokens ?? 0),
+      usage: makeUsage(res.usage?.input_tokens ?? 0, res.usage?.output_tokens ?? 0),
       model: this.model,
       providerId: this.providerId,
     };

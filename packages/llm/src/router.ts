@@ -102,10 +102,18 @@ class MeteredDecision implements TypedDecisionClient {
   }
 }
 
+/** Hard failures that mean "this provider is gone" — stop offering it. */
+function isProviderDead(err: unknown): boolean {
+  return err instanceof LlmError && (err.kind === "auth" || err.status === 404);
+}
+
 /** Primary with fallback: retryable provider errors transparently chain. */
 class FallbackText implements TextGenerationClient {
   readonly kind = "TextGeneration" as const;
-  constructor(private readonly chain: TextGenerationClient[]) {}
+  constructor(
+    private readonly chain: TextGenerationClient[],
+    private readonly onHardFailure?: (providerId: string) => void,
+  ) {}
   get providerId(): string {
     return this.chain[0]?.providerId ?? "none";
   }
@@ -121,6 +129,7 @@ class FallbackText implements TextGenerationClient {
         return await client.complete(options);
       } catch (err) {
         lastError = err;
+        if (isProviderDead(err)) this.onHardFailure?.(client.providerId);
         if (err instanceof LlmError && err.retryable) continue;
         throw err;
       }
@@ -131,7 +140,10 @@ class FallbackText implements TextGenerationClient {
 
 class FallbackDecision implements TypedDecisionClient {
   readonly kind = "TypedDecision" as const;
-  constructor(private readonly chain: TypedDecisionClient[]) {}
+  constructor(
+    private readonly chain: TypedDecisionClient[],
+    private readonly onHardFailure?: (providerId: string) => void,
+  ) {}
   get providerId(): string {
     return this.chain[0]?.providerId ?? "none";
   }
@@ -145,6 +157,7 @@ class FallbackDecision implements TypedDecisionClient {
         return await client.decide(request);
       } catch (err) {
         lastError = err;
+        if (isProviderDead(err)) this.onHardFailure?.(client.providerId);
         if (err instanceof LlmError && err.retryable) continue;
         throw err;
       }
@@ -162,6 +175,13 @@ class FallbackDecision implements TypedDecisionClient {
  */
 export class LlmRouter {
   readonly mocks: MockHandles;
+
+  /**
+   * Circuit breaker: providerIds that answered with a hard failure (bad auth,
+   * endpoint gone). They are dropped from fallback chains for the rest of the
+   * process — a dead fallback retried on every call wastes latency and tokens.
+   */
+  private readonly deadProviders = new Set<string>();
 
   constructor(
     private readonly routing: ModelRouting,
@@ -194,6 +214,7 @@ export class LlmRouter {
     const ids = [route.providerId, ...(route.fallbackProviderId ? [route.fallbackProviderId] : [])];
     const chain: Array<TextGenerationClient | TypedDecisionClient> = [];
     for (const id of ids) {
+      if (this.deadProviders.has(id)) continue; // tripped breaker — skip silently
       const provider = this.providerFor(id);
       if (!provider) continue;
       if (provider.kind !== kind) continue; // capability mismatch = unavailable
@@ -213,7 +234,7 @@ export class LlmRouter {
     if (chain.length === 0) {
       throw new LlmError("unknown", `no TextGeneration provider available for '${agentId}'`, "router");
     }
-    return new FallbackText(chain);
+    return new FallbackText(chain, (id) => this.deadProviders.add(id));
   }
 
   /**
@@ -242,6 +263,6 @@ export class LlmRouter {
     if (chain.length === 0) {
       throw new LlmError("unknown", `no TypedDecision provider available for '${agentId}'`, "router");
     }
-    return new FallbackDecision(chain);
+    return new FallbackDecision(chain, (id) => this.deadProviders.add(id));
   }
 }

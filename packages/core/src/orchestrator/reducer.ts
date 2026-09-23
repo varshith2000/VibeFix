@@ -199,6 +199,32 @@ export function reduce(
       break;
     }
 
+    case "SKIP_TO_REPORT": {
+      // No findings / no proposals: the remaining analysis agents (risk,
+      // synthesis, minimality, checkpoint) have nothing to work on. Mark them
+      // skipped and let Docent produce the "nothing to change" report.
+      const skippable = new Set(["diagnosis", "riskAssessment", "synthesis", "minimality"]);
+      if (!skippable.has(next.phase)) break; // too late (already past analysis)
+      const docent = registry.agentIdByPhase("report");
+      for (const [id, status] of Object.entries(next.agentStates)) {
+        if (id === docent) continue;
+        if (status !== "passed" && status !== "failed" && status !== "rejected" && status !== "deferred") {
+          next.agentStates[id] = "skipped";
+        }
+      }
+      next.phase = "report";
+      effects.push({ effect: "EmitEvent", type: "run.nochanges", message: event.reason });
+      if (docent) {
+        next.agentStates[docent] = "queued";
+        effects.push({ effect: "InvokeAgent", agentId: docent });
+      } else {
+        next.phase = "completed";
+        if (next.status !== "aborted") next.status = "completed";
+        effects.push({ effect: "EmitEvent", type: "run.completed" });
+      }
+      break;
+    }
+
     case "ABORT": {
       if (next.status === "completed" || next.status === "aborted") break;
       next.status = "aborted";
@@ -221,6 +247,23 @@ export function reduce(
       next.error = event.message;
       effects.push({ effect: "EmitEvent", type: "run.failed", message: event.message });
       effects.push({ effect: "CleanupWorktrees" });
+      break;
+    }
+
+    case "SKIP_TO_REPORT": {
+      // Skip remaining analysis phases and go straight to report
+      next.status = "running";
+      next.phase = "report";
+      next.error = null; // Clear any previous errors
+      effects.push({ effect: "EmitEvent", type: "run.nochanges", message: event.reason });
+      effects.push({ effect: "EmitEvent", type: "phase.entered", message: "report" });
+      
+      // Invoke the docent/report agent
+      const docent = registry.agentIdByPhase("report");
+      if (docent) {
+        next.agentStates[docent] = "queued";
+        effects.push({ effect: "InvokeAgent", agentId: docent });
+      }
       break;
     }
   }
