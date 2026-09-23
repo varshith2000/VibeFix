@@ -12,6 +12,7 @@ import type { AgentExecutorPort } from "./ports.js";
 import { OrchestratorRuntime } from "./runtime.js";
 import { createInitialRunState } from "./state.js";
 import { WorktreeManager } from "../worktree/worktree-manager.js";
+import { debug, info, warn, error } from "../util/logger.js";
 
 /** Per-run services the executor factory binds into agent contexts. */
 export interface RunServices {
@@ -48,15 +49,22 @@ export class RunManager {
     options?: { config?: RepoConfig; onBudgetWarn?: (runId: string) => void },
   ): Promise<RunManager> {
     const absolute = path.resolve(repoPath);
+    debug("run-manager", `Opening project at ${absolute}`);
+    
     const stat = await fs.stat(absolute).catch(() => null);
     if (!stat?.isDirectory()) {
+      error("run-manager", `Path ${repoPath} is not a directory`);
       throw new Error(`'${repoPath}' is not a directory`);
     }
+    
     const git = new GitTool(absolute);
     if (!(await git.isRepo())) {
+      error("run-manager", `Path ${repoPath} is not a git repository`);
       throw new Error(`'${repoPath}' is not a git repository (VibeFix needs git for worktrees)`);
     }
+    
     const config = options?.config ?? (await loadRepoConfig(absolute));
+    info("run-manager", `Successfully opened project at ${absolute}`);
     return new RunManager(absolute, executorFactory, config, options?.onBudgetWarn);
   }
 
@@ -114,8 +122,11 @@ export class RunManager {
   async createRun(mode: RefactoringMode): Promise<{ runtime: OrchestratorRuntime; state: RunState }> {
     await this.assertClean();
     const id = runId();
+    info("run-manager", `Creating new run ${id} with mode ${mode}`);
+    
     const paths = runPaths(this.repoPath, id);
     await fs.mkdir(paths.runDir, { recursive: true });
+    
     const probe = this.executorFactory({
       runId: id,
       repoPath: this.repoPath,
@@ -124,24 +135,54 @@ export class RunManager {
       meter: new BudgetMeter(this.config.routing.budgets),
       config: this.config,
     });
+    
     const agentIds = probe.definitions().map((d) => d.agentId);
     const state = createInitialRunState({ runId: id, repoPath: this.repoPath, mode, agentIds });
     const runtime = this.buildRuntime(id, state);
-    await fs.writeFile(paths.stateFile, JSON.stringify(state, null, 2), "utf8");
+    
+    try {
+      await fs.writeFile(paths.stateFile, JSON.stringify(state, null, 2), "utf8");
+      debug("run-manager", `Successfully persisted initial state for run ${id}`);
+    } catch (err) {
+      error("run-manager", `Failed to persist initial state for run ${id}:`, err);
+      throw err;
+    }
+    
     return { runtime, state };
   }
 
   async loadRun(runId: string): Promise<OrchestratorRuntime> {
+    info("run-manager", `Loading run ${runId}`);
+    
     const paths = runPaths(this.repoPath, runId);
-    const raw = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
+    } catch (err) {
+      error("run-manager", `Failed to read state file for run ${runId}:`, err);
+      throw new Error(`Failed to load run ${runId}: state file corrupted or missing`);
+    }
+    
     const state = raw as RunState;
+    
     // Heal stale "running" states: nothing executes while paused or terminal,
     // so any agent still marked running was orphaned by a crash/restart.
+    let healedAgents = 0;
     if (state.status !== "running" && state.status !== "paused") {
       for (const [id, s] of Object.entries(state.agentStates)) {
-        if (s === "running") state.agentStates[id] = "failed";
+        if (s === "running") {
+          state.agentStates[id] = "failed";
+          healedAgents++;
+          warn("run-manager", `Healed stale agent state: ${id} from running to failed`);
+        }
       }
     }
+    
+    if (healedAgents > 0) {
+      info("run-manager", `Healed ${healedAgents} stale agent states for run ${runId}`);
+    }
+    
+    debug("run-manager", `Successfully loaded run ${runId} in phase ${state.phase}, status ${state.status}`);
     return this.buildRuntime(runId, state);
   }
 

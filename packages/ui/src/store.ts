@@ -36,54 +36,82 @@ export const useRunStore = create<RunStore>((set, get) => ({
     get().disconnect();
     set({ usage: EMPTY_USAGE, events: [], lastEventAt: null, wsStatus: "connecting" });
     void get().syncEvents(); // durable REST log works even if WS never connects
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${location.host}/ws?runId=${runId}`);
-    ws.onopen = () => {
-      set({ wsStatus: "live" });
-      void get().syncEvents(); // catch anything missed before the socket opened
+    
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 10;
+    const baseReconnectDelay = 1_000;
+    const maxReconnectDelay = 30_000;
+    
+    const attemptConnection = () => {
+      const protocol = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${protocol}://${location.host}/ws?runId=${runId}`);
+      
+      ws.onopen = () => {
+        reconnectAttempts = 0;
+        set({ wsStatus: "live" });
+        void get().syncEvents(); // catch anything missed before the socket opened
+      };
+      
+      ws.onmessage = (msg) => {
+        try {
+          const frame = JSON.parse(msg.data as string) as
+            | { t: "snapshot"; state: RunState }
+            | { t: "usage"; usage: RunStore["usage"] }
+            | { t: "event"; event: RunEvent; seq: number }
+            | { t: "readonly"; runId: string };
+          if (frame.t === "snapshot") get().applySnapshot(frame.state);
+          else if (frame.t === "usage") get().applyUsage(frame.usage);
+          else if (frame.t === "event") get().pushEvent(frame.event);
+          else if (frame.t === "readonly") set({ wsStatus: "offline" }); // replay-only socket; REST polling feeds updates
+        } catch {
+          // ignore malformed frame
+        }
+      };
+      
+      ws.onclose = () => {
+        if (get().runId !== runId) return;
+        set({ wsStatus: "offline" });
+        
+        // Exponential backoff reconnection logic
+        if (reconnectAttempts < maxReconnectAttempts) {
+          reconnectAttempts++;
+          const delay = Math.min(baseReconnectDelay * Math.pow(2, reconnectAttempts - 1), maxReconnectDelay);
+          setTimeout(() => {
+            if (get().runId === runId) attemptConnection();
+          }, delay);
+        } else {
+          // After max attempts, rely solely on REST polling
+          console.warn(`[VibeFix] WebSocket reconnection failed after ${maxReconnectAttempts} attempts, using REST polling`);
+        }
+      };
+      
+      ws.onerror = () => {
+        console.warn(`[VibeFix] WebSocket error, attempting reconnection (attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})`);
+      };
+      
+      set({ runId, ws });
     };
-    ws.onmessage = (msg) => {
-      try {
-        const frame = JSON.parse(msg.data as string) as
-          | { t: "snapshot"; state: RunState }
-          | { t: "usage"; usage: RunStore["usage"] }
-          | { t: "event"; event: RunEvent; seq: number }
-          | { t: "readonly"; runId: string };
-        if (frame.t === "snapshot") get().applySnapshot(frame.state);
-        else if (frame.t === "usage") get().applyUsage(frame.usage);
-        else if (frame.t === "event") get().pushEvent(frame.event);
-        else if (frame.t === "readonly") set({ wsStatus: "offline" }); // replay-only socket; REST polling feeds updates
-      } catch {
-        // ignore malformed frame
-      }
-    };
-    ws.onclose = () => {
-      if (get().runId !== runId) return;
-      set({ wsStatus: "offline" });
-      // Reconnect with backoff; the REST event log (and 3s polling) keeps the
-      // UI fed meanwhile, so a dropped socket never means a blank stream.
-      setTimeout(() => {
-        if (get().runId === runId) get().connect(runId);
-      }, 2_000);
-    };
-    set({ runId, ws });
+    
+    attemptConnection();
   },
 
   async syncEvents() {
-    const { runId } = get();
+    const { runId, events } = get();
     if (!runId) return;
     try {
-      const { events } = await api.events(runId);
-      if (get().runId !== runId || events.length === 0) return;
+      const lastSeq = events.length > 0 ? events[events.length - 1].seq : 0;
+      const { events: newEvents } = await api.events(runId, lastSeq);
+      if (get().runId !== runId || newEvents.length === 0) return;
       set((s) => {
         const seen = new Set(s.events.map((e) => e.eventId));
-        const fresh = events.filter((e) => !seen.has(e.eventId));
+        const fresh = newEvents.filter((e) => !seen.has(e.eventId));
         if (fresh.length === 0) return {};
         const merged = [...s.events, ...fresh].sort((a, b) => a.seq - b.seq).slice(-500);
         return { events: merged, lastEventAt: Date.now() };
       });
-    } catch {
-      // server unreachable — polling retries
+    } catch (err) {
+      // server unreachable — polling retries, but log the error for debugging
+      console.warn(`[VibeFix] Failed to sync events: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 

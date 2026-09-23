@@ -32,6 +32,10 @@ export class ProjectRegistry {
     return this.runtimes.get(runId);
   }
 
+  activeRuntimeCount(): number {
+    return this.runtimes.size;
+  }
+
   /**
    * Runs a promise (e.g. dispatch(START) / approve / resume) in the background,
    * remembering it so errors surface in logs and tests can await completion.

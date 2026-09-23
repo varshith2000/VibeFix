@@ -47,12 +47,27 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
     };
     const { envelope, json } = encodeArtifact(artifact);
     const dir = this.producerDir(input.producer);
-    await fs.mkdir(dir, { recursive: true });
+    try {
+      await fs.mkdir(dir, { recursive: true });
+    } catch (err) {
+      console.error(`[VibeFix] Failed to create producer directory ${dir}:`, err);
+      throw err;
+    }
     // Immutability: refuse to silently overwrite a different content at same id (ids are unique anyway).
-    await atomicWrite(path.join(dir, `${envelope.artifactId}.json`), json);
+    try {
+      await atomicWrite(path.join(dir, `${envelope.artifactId}.json`), json);
+    } catch (err) {
+      console.error(`[VibeFix] Failed to write artifact ${envelope.artifactId}:`, err);
+      throw err;
+    }
     // Convenience latest-by-kind pointers at run level.
     const pointer = path.join(this.paths.evidenceDir, `latest-${envelope.kind}.json`);
-    await atomicWrite(pointer, json);
+    try {
+      await atomicWrite(pointer, json);
+    } catch (err) {
+      console.error(`[VibeFix] Failed to update latest pointer for ${envelope.kind}:`, err);
+      // Non-critical: the artifact itself was written successfully
+    }
     return envelope;
   }
 
@@ -142,10 +157,10 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
  */
 export async function atomicWrite(filePath: string, content: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const tmp = `${filePath}.tmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${process.pid}`;
   await fs.writeFile(tmp, content, "utf8");
   let lastError: unknown;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 10; attempt++) {
     try {
       await fs.rename(tmp, filePath);
       return;
@@ -156,7 +171,9 @@ export async function atomicWrite(filePath: string, content: string): Promise<vo
         await fs.rm(tmp, { force: true }).catch(() => undefined);
         throw err;
       }
-      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+      // Exponential backoff with jitter
+      const delay = Math.min(100 * Math.pow(2, attempt), 1000) + Math.random() * 50;
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
   await fs.rm(tmp, { force: true }).catch(() => undefined);

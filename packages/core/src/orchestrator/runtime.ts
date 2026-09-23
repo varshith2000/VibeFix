@@ -19,6 +19,7 @@ import type { AgentExecutorPort, AgentExecutionInput, AgentExecutionOutcome } fr
 import type { RunEvent } from "./state.js";
 import type { WorktreeManager, WorktreeHandle } from "../worktree/worktree-manager.js";
 import { ChangeFirewall } from "../worktree/firewall.js";
+import { debug, info, warn, error } from "../util/logger.js";
 
 const POOL_CONCURRENCY = 3;
 
@@ -86,22 +87,40 @@ export class OrchestratorRuntime {
    * deadlock against a lock held across effect execution.
    */
   dispatch(event: RunEvent): Promise<void> {
+    const eventId = `${event.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    debug("orchestrator", `Dispatching event ${eventId} of type ${event.type}`);
+    
     const locked = this.dispatchQueue.then(() => this.reduceAndPersist(event));
     // Keep the queue alive even if one dispatch fails; the error propagates
     // to the caller, subsequent dispatches still run.
     this.dispatchQueue = locked.then(
-      () => undefined,
-      () => undefined,
+      () => {
+        debug("orchestrator", `Event ${eventId} completed successfully`);
+        return undefined;
+      },
+      (err) => {
+        error("orchestrator", `Dispatch queue error for event ${eventId}: ${err instanceof Error ? err.message : String(err)}`);
+        return undefined;
+      },
     );
-    return locked.then((effects) => this.performEffects(effects));
+    return locked.then((effects) => {
+      debug("orchestrator", `Performing ${effects.length} effects for event ${eventId}`);
+      return this.performEffects(effects);
+    });
   }
 
   private dispatchQueue: Promise<void> = Promise.resolve();
 
   private async reduceAndPersist(event: RunEvent): Promise<ReturnType<typeof reduce>["effects"]> {
     if (this.state.status === "completed" || this.state.status === "aborted" || this.state.status === "failed") {
-      if (event.type !== "ABORT") return []; // terminal: ignore stale work
+      if (event.type !== "ABORT") {
+        debug("orchestrator", `Ignoring event ${event.type} for terminal run ${this.runId}`);
+        return []; // terminal: ignore stale work
+      }
     }
+    
+    debug("orchestrator", `Processing event ${event.type} for run ${this.runId}`);
+    
     const { state, effects } = reduce(
       this.state,
       event,
@@ -110,34 +129,49 @@ export class OrchestratorRuntime {
     );
     this.state = state;
     this.state.budget.tokensSpent = this.deps.meter.tokens; // runtime-owned field
-    await this.persist();
+    try {
+      await this.persist();
+      debug("orchestrator", `Successfully persisted state for event ${event.type}`);
+    } catch (err) {
+      error("orchestrator", `Persistence failed for event ${event.type}:`, err);
+      throw err; // Let the caller handle the error
+    }
     return effects;
   }
 
   private async performEffects(effects: ReturnType<typeof reduce>["effects"]): Promise<void> {
     for (const effect of effects) {
-      switch (effect.effect) {
-        case "EmitEvent":
-          await this.deps.events.append(this.runId, effect.type, {
-            agentId: effect.agentId,
-            message: effect.message,
-            payload: effect.payload,
-          });
-          break;
-        case "SpawnPool":
-          await this.runPool(effect.pool, effect.agentIds);
-          break;
-        case "InvokeAgent":
-          await this.runSequentialAgent(effect.agentId);
-          break;
-        case "ExecuteProposal":
-          await this.executeProposal(effect.proposalId, effect.attempt);
-          break;
-        case "PauseForApproval":
-          break; // state persisted; server serves the checkpoint
-        case "CleanupWorktrees":
-          await this.deps.worktrees.cleanupAll().catch(() => undefined);
-          break;
+      try {
+        switch (effect.effect) {
+          case "EmitEvent":
+            await this.deps.events.append(this.runId, effect.type, {
+              agentId: effect.agentId,
+              message: effect.message,
+              payload: effect.payload,
+            });
+            break;
+          case "SpawnPool":
+            await this.runPool(effect.pool, effect.agentIds);
+            break;
+          case "InvokeAgent":
+            await this.runSequentialAgent(effect.agentId);
+            break;
+          case "ExecuteProposal":
+            await this.executeProposal(effect.proposalId, effect.attempt);
+            break;
+          case "PauseForApproval":
+            break; // state persisted; server serves the checkpoint
+          case "CleanupWorktrees":
+            await this.deps.worktrees.cleanupAll().catch(() => undefined);
+            break;
+        }
+      } catch (err) {
+        console.error(`[VibeFix] Effect execution failed for ${effect.effect}:`, err);
+        // Continue with other effects unless it's a critical failure
+        if (effect.effect === "EmitEvent") {
+          // Event emission failure is critical - we should log and continue
+          console.warn(`[VibeFix] Continuing despite event emission failure`);
+        }
       }
       if (this.deps.meter.exceeded) {
         await this.dispatch({ type: "BUDGET_EXCEEDED" });

@@ -3,6 +3,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { GitTool } from "@vibefix/adapters";
 import { worktreesDir } from "../store/paths.js";
+import { debug, info, warn, error } from "../util/logger.js";
 
 export interface WorktreeHandle {
   proposalId: string;
@@ -33,14 +34,24 @@ export class WorktreeManager {
     const slug = `${proposalId.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-a${attempt}`;
     const branch = `vibefix/${slug}`;
     const wtPath = path.join(this.worktreesRoot, slug);
-    await fs.mkdir(path.dirname(wtPath), { recursive: true });
-    const res = await this.git.addWorktree(wtPath, branch);
-    if (res.code !== 0) {
-      throw new Error(`worktree add failed: ${res.stderr}\n${res.stdout}`);
+    
+    debug("worktree", `Creating worktree for proposal ${proposalId}, attempt ${attempt}`);
+    
+    try {
+      await fs.mkdir(path.dirname(wtPath), { recursive: true });
+      const res = await this.git.addWorktree(wtPath, branch);
+      if (res.code !== 0) {
+        error("worktree", `Worktree add failed for ${slug}: ${res.stderr}\n${res.stdout}`);
+        throw new Error(`worktree add failed: ${res.stderr}\n${res.stdout}`);
+      }
+      const baseCommit = await this.git.headCommit();
+      await this.linkNodeModules(wtPath);
+      info("worktree", `Successfully created worktree ${slug} at ${wtPath}`);
+      return { proposalId, attempt, branch, path: wtPath, baseCommit };
+    } catch (err) {
+      error("worktree", `Failed to create worktree for ${slug}:`, err);
+      throw err;
     }
-    const baseCommit = await this.git.headCommit();
-    await this.linkNodeModules(wtPath);
-    return { proposalId, attempt, branch, path: wtPath, baseCommit };
   }
 
   /** Diff of uncommitted changes inside the worktree. */
@@ -81,12 +92,31 @@ export class WorktreeManager {
     try {
       entries = await fs.readdir(dir);
     } catch {
+      debug("worktree", `No worktrees directory found at ${dir}`);
       return;
     }
+    
+    info("worktree", `Cleaning up ${entries.length} worktrees in ${dir}`);
+    
+    const cleanupErrors: Array<{ entry: string; error: string }> = [];
+    
     for (const entry of entries) {
       const wtPath = path.join(dir, entry);
-      await this.git.removeWorktree(wtPath, true).catch(() => undefined);
-      await this.git.deleteBranch(`vibefix/${entry}`, true).catch(() => undefined);
+      try {
+        await this.git.removeWorktree(wtPath, true);
+        await this.git.deleteBranch(`vibefix/${entry}`, true);
+        debug("worktree", `Successfully cleaned up worktree ${entry}`);
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        cleanupErrors.push({ entry, error: errorMsg });
+        warn("worktree", `Failed to cleanup worktree ${entry}: ${errorMsg}`);
+      }
+    }
+    
+    if (cleanupErrors.length > 0) {
+      warn("worktree", `Cleanup completed with ${cleanupErrors.length} errors out of ${entries.length} worktrees`);
+    } else {
+      info("worktree", `Successfully cleaned up all ${entries.length} worktrees`);
     }
   }
 

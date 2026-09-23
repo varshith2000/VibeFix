@@ -413,8 +413,12 @@ function RunScreen({
   // also works for runs whose runtime is no longer live in the server).
   useEffect(() => {
     const timer = setInterval(() => {
-      void api.run(runId).then((s) => useRunStore.getState().applySnapshot(s)).catch(() => undefined);
-      void api.usage(runId).then((u) => useRunStore.getState().applyUsage(u)).catch(() => undefined);
+      void api.run(runId).then((s) => useRunStore.getState().applySnapshot(s)).catch((err) => {
+        console.warn(`[VibeFix] Failed to sync run state: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      void api.usage(runId).then((u) => useRunStore.getState().applyUsage(u)).catch((err) => {
+        console.warn(`[VibeFix] Failed to sync usage: ${err instanceof Error ? err.message : String(err)}`);
+      });
       void useRunStore.getState().syncEvents();
     }, 3_000);
     return () => clearInterval(timer);

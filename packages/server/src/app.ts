@@ -111,6 +111,16 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
     return new EvidenceStore({ evidenceDir: path.join(runDir, "evidence") } as never);
   };
 
+  // ---------- health check ----------
+  app.get("/api/health", async () => {
+    return {
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      version: "0.1.0",
+      activeRuntimes: registry.activeRuntimeCount(),
+    };
+  });
+
   // ---------- catalog ----------
   app.get("/api/agents", async () => AGENT_DEFINITIONS);
 
@@ -205,13 +215,19 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
       const runtime = await manager.loadRun(runId);
       registry.registerRuntime(runtime, manager.repoPath);
       const state = runtime.snapshot();
+      
       // A run whose on-disk status is "running" was interrupted by a server
       // restart — resume it so the UI actually progresses.
       if (state.status === "running") {
+        console.log(`[VibeFix] Resuming interrupted run ${runId} from phase ${state.phase}`);
         registry.track(runId, runtime.resume());
+      } else {
+        console.log(`[VibeFix] Loading completed run ${runId} for viewing`);
       }
+      
       return { runId, state };
     } catch (err) {
+      console.error(`[VibeFix] Failed to open run ${runId}:`, err);
       return reply.code(404).send({ error: String(err instanceof Error ? err.message : err) });
     }
   });
@@ -330,8 +346,14 @@ export function buildApp(registry: ProjectRegistry, options: BuildAppOptions = {
         (backlog?.success ? backlog.data.proposals.map((p) => p.proposalId) : []) ??
         [];
       const mode = req.body?.mode ?? state.mode;
-      registry.track(runId, runtime.dispatch({ type: "CHECKPOINT_APPROVED", mode, approvedProposalIds: approved }));
-      return { ok: true, approved, mode };
+      
+      try {
+        await registry.track(runId, runtime.dispatch({ type: "CHECKPOINT_APPROVED", mode, approvedProposalIds: approved }));
+        return { ok: true, approved, mode };
+      } catch (err) {
+        console.error(`[VibeFix] Checkpoint approval failed for run ${runId}:`, err);
+        return reply.code(500).send({ error: String(err instanceof Error ? err.message : err) });
+      }
     },
   );
 

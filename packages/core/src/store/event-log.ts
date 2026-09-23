@@ -54,7 +54,13 @@ export class EventLog {
       type,
       ...fields,
     };
-    await fs.appendFile(this.paths.eventsFile, `${JSON.stringify(event)}\n`, "utf8");
+    try {
+      await fs.appendFile(this.paths.eventsFile, `${JSON.stringify(event)}\n`, "utf8");
+    } catch (err) {
+      console.error(`[VibeFix] Failed to append event to log:`, err);
+      // Still emit the event to subscribers even if persistence fails
+      // This ensures real-time updates work even if disk I/O fails
+    }
     this.bus.emit("event", event);
     return event;
   }
