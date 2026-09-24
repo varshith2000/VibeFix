@@ -67,8 +67,13 @@ if (process.env.ANTHROPIC_API_KEY) {
     responseSchema: z.object({ ok: z.boolean(), note: z.string() }),
     maxTokens: 512,
     temperature: 0.2,
+  }).catch((err) => {
+    // An invalid/disabled key is a configuration note, not a smoke failure —
+    // anthropic is opt-in and not part of the default routing.
+    console.log(`anthropic skipped (${String(err.message ?? err).slice(0, 80)})`);
+    return null;
   });
-  console.log("anthropic (temperature 400 self-heal) ->", JSON.stringify(a.structured));
+  if (a) console.log("anthropic (temperature 400 self-heal) ->", JSON.stringify(a.structured));
 }
 
 // Text fallback (openrouter-text) — what the engineer chain uses when Gemini is down.

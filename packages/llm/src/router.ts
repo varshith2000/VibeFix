@@ -110,7 +110,14 @@ function isProviderDead(err: unknown): boolean {
   return err instanceof LlmError && (err.kind === "auth" || err.status === 404);
 }
 
-/** Primary with fallback: retryable provider errors transparently chain. */
+/** Primary with fallback: any provider failure transparently chains.
+ *
+ * A DEAD provider (auth/404 — deprecated model slug, rotated key) must fall
+ * through to the next hop, not abort the chain: non-retryable used to mean
+ * "throw immediately", which silenced the fallback whenever the primary's
+ * model was deprecated and degraded every agent to deterministic output.
+ * Only non-Llm errors (aborts, programming bugs) rethrow untouched.
+ */
 class FallbackText implements TextGenerationClient {
   readonly kind = "TextGeneration" as const;
   constructor(
@@ -132,8 +139,10 @@ class FallbackText implements TextGenerationClient {
         return await client.complete(options);
       } catch (err) {
         lastError = err;
-        if (isProviderDead(err)) this.onHardFailure?.(client.providerId);
-        if (err instanceof LlmError && err.retryable) continue;
+        if (err instanceof LlmError) {
+          if (isProviderDead(err)) this.onHardFailure?.(client.providerId);
+          continue; // try the next provider — a failure here is why we have one
+        }
         throw err;
       }
     }
@@ -160,8 +169,10 @@ class FallbackDecision implements TypedDecisionClient {
         return await client.decide(request);
       } catch (err) {
         lastError = err;
-        if (isProviderDead(err)) this.onHardFailure?.(client.providerId);
-        if (err instanceof LlmError && err.retryable) continue;
+        if (err instanceof LlmError) {
+          if (isProviderDead(err)) this.onHardFailure?.(client.providerId);
+          continue;
+        }
         throw err;
       }
     }

@@ -2,6 +2,8 @@ import type { FindingsArtifact } from "@vibefix/schemas";
 import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
 import { makeFinding } from "../shared/findings.js";
+import { enrich } from "../runtime/text-agent-loop.js";
+import { z } from "zod";
 
 /** DFS cycle detection over the resolved import graph. */
 function findCycles(edges: Array<{ from: string; to: string }>): string[][] {
@@ -118,12 +120,77 @@ export class ArchitectureAuditor implements VibeFixAgent {
         }
       }
 
-      await ctx.progress(`${findings.length} architecture findings`);
+      await ctx.progress(`${findings.length} deterministic architecture findings, asking the architect model for more`);
+
+      // LLM discovery pass: the deterministic heuristics only catch cycles,
+      // fan extremes and UI->db imports. A senior architect reading the same
+      // graph also spots missing abstractions, mixed layers inside one
+      // module, business logic in controllers, and de-facto god directories —
+      // patterns that have no cheap regex. Deterministic findings always
+      // survive; this pass only ADDS.
+      const digest = {
+        frameworks: ctx.tools.snapshot.frameworks.map((f) => f.name),
+        entrypoints: ctx.tools.snapshot.entrypoints.slice(0, 10),
+        modulesByDirectory: [...new Set(ctx.tools.snapshot.files.map((f) => f.path.split("/").slice(0, 2).join("/")))].slice(0, 40),
+        topFanIn: [...fanIn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12),
+        topFanOut: [...fanOut.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12),
+        importEdges: edges.slice(0, 250).map((e) => `${e.from} -> ${e.to}`),
+      };
+      const discovered = await enrich(ctx, {
+        system:
+          "You are a principal software architect reviewing a codebase's dependency structure. " +
+          "Report ONLY real structural problems you can point to in the evidence — never style nits. " +
+          "Each finding must cite specific files from the provided graph. If the architecture is sound, return an empty list.",
+        prompt:
+          "Identify architectural problems in this codebase digest that the graph metrics alone would miss: " +
+          "leaky layering, missing abstraction over a dependency knot, business logic far from its data, " +
+          "modules mixing concerns, unstable interfaces many files depend on.\n\n" +
+          JSON.stringify(digest),
+        schema: z.object({
+          findings: z.array(
+            z.object({
+              title: z.string().min(1),
+              location: z.string().min(1),
+              evidence: z.array(z.string().min(1)).min(1),
+              impact: z.string().min(1),
+              recommendedChangeCategory: z.enum([
+                "extract-module",
+                "extract-service",
+                "introduce-boundary",
+                "move-code",
+                "rename",
+                "none",
+              ]),
+              confidence: z.number().min(0).max(1),
+            }),
+          ),
+        }),
+        maxTokens: 2_048,
+      });
+      if (discovered) {
+        const knownTitles = new Set(findings.map((f) => f.title.toLowerCase()));
+        for (const d of discovered.findings.slice(0, 10)) {
+          if (knownTitles.has(d.title.toLowerCase())) continue;
+          findings.push(
+            makeFinding({
+              title: d.title,
+              location: d.location,
+              evidence: d.evidence.slice(0, 8),
+              impact: d.impact,
+              category: "architecture",
+              recommendedChangeCategory: d.recommendedChangeCategory,
+              confidence: d.confidence,
+            }),
+          );
+        }
+        await ctx.progress(`architect model added ${findings.length} total architecture findings`);
+      }
+
       const artifact = await ctx.store.write({
         kind: "findings",
         producer: ctx.def.agentId,
         runId: ctx.runState.runId,
-        data: { findings, notes: ["import-graph analysis"] } satisfies FindingsArtifact,
+        data: { findings, notes: ["import-graph analysis", "llm architect discovery pass"] } satisfies FindingsArtifact,
       });
       return passed([artifact.artifactId]);
     } catch (err) {

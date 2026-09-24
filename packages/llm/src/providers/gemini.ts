@@ -4,6 +4,7 @@ import { makeUsage } from "../usage.js";
 import { LlmError } from "../errors.js";
 import type { ProviderConfig } from "@vibefix/schemas";
 import { postJson, extractFirstJson } from "./http.js";
+import { geminiModelOverride, rememberGeminiModel, suggestedGeminiModel } from "./model-recovery.js";
 
 interface GeminiResponse {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -27,30 +28,46 @@ export class GeminiClient implements TextGenerationClient {
     return this.config.providerId;
   }
   get model(): string {
-    return this.config.defaultModel;
+    return geminiModelOverride(this.config.providerId) ?? this.config.defaultModel;
   }
 
   async complete<T = unknown>(
     options: CompleteOptions & { responseSchema?: z.ZodType<T> },
   ): Promise<CompleteResult<T>> {
     const system = options.system;
-    const res = await postJson<GeminiResponse>({
-      url: `${this.config.baseUrl ?? "https://generativelanguage.googleapis.com"}/v1beta/models/${this.model}:generateContent`,
-      headers: { "x-goog-api-key": this.apiKey },
-      body: {
-        contents: options.messages.map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }],
-        })),
-        ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-        generationConfig: {
-          maxOutputTokens: options.maxTokens ?? this.config.maxOutputTokens,
-          ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-          ...(options.responseSchema ? { responseMimeType: "application/json" } : {}),
+    const request = async (model: string): Promise<GeminiResponse> =>
+      postJson<GeminiResponse>({
+        url: `${this.config.baseUrl ?? "https://generativelanguage.googleapis.com"}/v1beta/models/${model}:generateContent`,
+        headers: { "x-goog-api-key": this.apiKey },
+        body: {
+          contents: options.messages.map((m) => ({
+            role: m.role === "assistant" ? "model" : "user",
+            parts: [{ text: m.content }],
+          })),
+          ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+          generationConfig: {
+            maxOutputTokens: options.maxTokens ?? this.config.maxOutputTokens,
+            ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+            ...(options.responseSchema ? { responseMimeType: "application/json" } : {}),
+          },
         },
-      },
-      signal: options.signal,
-    });
+        signal: options.signal,
+      });
+
+    let res: GeminiResponse;
+    try {
+      res = await request(this.model);
+    } catch (err) {
+      // Deprecated slug? Google's 404 names the replacement — adopt it for
+      // the rest of the process instead of failing every call.
+      const suggested = suggestedGeminiModel(err);
+      if (suggested && suggested !== this.model) {
+        rememberGeminiModel(this.config.providerId, suggested);
+        res = await request(this.model);
+      } else {
+        throw err;
+      }
+    }
 
     const text = (res.candidates?.[0]?.content?.parts ?? [])
       .map((p) => p.text ?? "")

@@ -72,7 +72,10 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       kind: "TextGeneration",
       adapter: "gemini",
       apiKeyEnv: "GEMINI_API_KEY",
-      defaultModel: "gemini-2.5-flash",
+      // gemini-2.5-flash is 404-deprecated for new keys; 3.6-flash is the
+      // replacement Google's own error body recommends. Future deprecations
+      // self-heal: the client adopts the slug named in the 404.
+      defaultModel: "gemini-3.6-flash",
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 8_192,
       pricePerMTokInput: 0.075,
@@ -119,7 +122,7 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
       kind: "TypedDecision",
       adapter: "gemini-decision",
       apiKeyEnv: "GEMINI_API_KEY",
-      defaultModel: "gemini-2.5-flash",
+      defaultModel: "gemini-3.6-flash",
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 2_048,
       pricePerMTokInput: 0.075,
@@ -128,14 +131,15 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
     },
     {
       // Free OpenRouter model — the cost-zero fallback when direct Gemini
-      // is down/overloaded. :free models are rate-limited, which is fine for
-      // a fallback that should rarely carry traffic.
+      // is down/overloaded. Free slugs retire without notice, so a 404 here
+      // triggers a live catalog lookup for whichever model is free RIGHT NOW
+      // (never the paid upgrade the error body suggests).
       providerId: "openrouter",
       kind: "TypedDecision",
       adapter: "openrouter",
       apiKeyEnv: "OPENROUTER_API_KEY",
-      defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
-      contextWindowTokens: 131_072,
+      defaultModel: "nvidia/nemotron-3-super-120b-a12b:free",
+      contextWindowTokens: 262_144,
       maxOutputTokens: 2_048,
       enabled: true,
     },

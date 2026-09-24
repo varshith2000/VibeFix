@@ -3,6 +3,7 @@ import { makeUsage } from "../usage.js";
 import type { ProviderConfig } from "@vibefix/schemas";
 import { postJson } from "./http.js";
 import { buildDecisionPrompt, parseDecisionAnswers } from "./decision-wire.js";
+import { geminiModelOverride, rememberGeminiModel, suggestedGeminiModel } from "./model-recovery.js";
 
 interface GeminiResponse {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
@@ -27,23 +28,39 @@ export class GeminiDecisionClient implements TypedDecisionClient {
     return this.config.providerId;
   }
   get model(): string {
-    return this.config.defaultModel;
+    return geminiModelOverride(this.config.providerId) ?? this.config.defaultModel;
   }
 
   async decide(request: DecisionRequest): Promise<DecisionResult> {
-    const res = await postJson<GeminiResponse>({
-      url: `${this.config.baseUrl ?? "https://generativelanguage.googleapis.com"}/v1beta/models/${this.model}:generateContent`,
-      headers: { "x-goog-api-key": this.apiKey },
-      body: {
-        contents: [{ role: "user", parts: [{ text: buildDecisionPrompt(request) }] }],
-        generationConfig: {
-          maxOutputTokens: this.config.maxOutputTokens,
-          temperature: 0,
-          responseMimeType: "application/json",
+    const prompt = buildDecisionPrompt(request);
+    const call = async (model: string): Promise<GeminiResponse> =>
+      postJson<GeminiResponse>({
+        url: `${this.config.baseUrl ?? "https://generativelanguage.googleapis.com"}/v1beta/models/${model}:generateContent`,
+        headers: { "x-goog-api-key": this.apiKey },
+        body: {
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: {
+            maxOutputTokens: this.config.maxOutputTokens,
+            temperature: 0,
+            responseMimeType: "application/json",
+          },
         },
-      },
-      signal: request.signal,
-    });
+        signal: request.signal,
+      });
+
+    let res: GeminiResponse;
+    try {
+      res = await call(this.model);
+    } catch (err) {
+      // Adopt Google's own replacement when the configured slug is deprecated.
+      const suggested = suggestedGeminiModel(err);
+      if (suggested && suggested !== this.model) {
+        rememberGeminiModel(this.config.providerId, suggested);
+        res = await call(this.model);
+      } else {
+        throw err;
+      }
+    }
 
     const text = (res.candidates?.[0]?.content?.parts ?? [])
       .map((p) => p.text ?? "")

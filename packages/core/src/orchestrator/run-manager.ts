@@ -243,11 +243,16 @@ export async function loadRepoConfig(repoPath: string): Promise<RepoConfig> {
         (p) => p.providerId === "gemini-decision",
       )!;
       const openrouter = parsed.routing.providers.find((p) => p.providerId === "openrouter");
-      if (openrouter && openrouter.defaultModel === "google/gemini-2.5-flash") {
-        openrouter.defaultModel = "meta-llama/llama-3.3-70b-instruct:free";
-        openrouter.contextWindowTokens = geminiDecision.contextWindowTokens;
-        openrouter.pricePerMTokInput = undefined;
-        openrouter.pricePerMTokOutput = undefined;
+      // Retired free slugs (verified dead). Paid/standard slugs like
+      // google/gemini-3.8-flash still work on OpenRouter — never heal those
+      // away, they may be the user's deliberate pick.
+      const DEAD_OPENROUTER = new Set(["meta-llama/llama-3.3-70b-instruct:free"]);
+      if (openrouter && DEAD_OPENROUTER.has(openrouter.defaultModel)) {
+        const fresh = structuredClone(DEFAULT_MODEL_ROUTING).providers.find((p) => p.providerId === "openrouter")!;
+        openrouter.defaultModel = fresh.defaultModel;
+        openrouter.contextWindowTokens = fresh.contextWindowTokens;
+        openrouter.pricePerMTokInput = fresh.pricePerMTokInput;
+        openrouter.pricePerMTokOutput = fresh.pricePerMTokOutput;
       }
       const routes = { ...parsed.routing.routes };
       for (const [agentId, route] of Object.entries(routes)) {
@@ -265,12 +270,22 @@ export async function loadRepoConfig(repoPath: string): Promise<RepoConfig> {
       };
     }
     // Merge in any newly-added agent routes so upgrades don't leave agents unrouted.
+    // Also bump Google slugs that are 404-deprecated for new keys — a saved
+    // config naming one fails every direct call (the clients self-heal at
+    // runtime too; this keeps the Settings UI honest).
+    const DEAD_GEMINI_MODELS = new Set(["gemini-2.5-flash", "gemini-2.0-flash"]);
+    const CURRENT_GEMINI = DEFAULT_MODEL_ROUTING.providers.find((p) => p.providerId === "gemini")?.defaultModel;
+    const providers = parsed.routing.providers.map((p) =>
+      p.adapter === "gemini" || p.adapter === "gemini-decision"
+        ? { ...p, defaultModel: DEAD_GEMINI_MODELS.has(p.defaultModel) && CURRENT_GEMINI ? CURRENT_GEMINI : p.defaultModel }
+        : p,
+    );
     return {
       ...parsed,
       routing: {
         ...parsed.routing,
         routes: { ...DEFAULT_MODEL_ROUTING.routes, ...parsed.routing.routes },
-        providers: parsed.routing.providers.length > 0 ? parsed.routing.providers : DEFAULT_MODEL_ROUTING.providers,
+        providers: providers.length > 0 ? providers : DEFAULT_MODEL_ROUTING.providers,
       },
     };
   } catch {
