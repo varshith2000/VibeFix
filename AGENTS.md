@@ -1,5 +1,11 @@
 # VibeFix Production-Grade Improvements
 
+> **Status (2026-09-27):** this document is a historical changelog of hardening work,
+> not a readiness claim. The application is **not production-ready**; the enforceable
+> contract and its verified state live in `docs/production-contract.md` (see also the
+> audit and hostile review under `docs/`). Items below marked with known limitations
+> were found incomplete by the audit.
+
 ## Overview
 This document outlines the production-grade improvements made to the VibeFix codebase to address critical issues with WebSocket connectivity, execution flow, state synchronization, and overall system reliability.
 
@@ -60,7 +66,7 @@ This document outlines the production-grade improvements made to the VibeFix cod
 **Problem**: Event persistence failures could lead to data loss and inconsistent state.
 **Solution**:
 - Enhanced event log with better error handling
-- Added fallback to emit events even if persistence fails
+- Added fallback to emit events even if persistence fails *(known limitation: the emitted event is memory-only, its sequence number can be reused after restart, and the failure is not surfaced as degraded — contract REL-03/REL-04)*
 - Improved atomic write operations with better retry logic
 - Added Windows-specific file operation improvements
 - Enhanced corrupt line handling in event replay
@@ -133,6 +139,11 @@ This document outlines the production-grade improvements made to the VibeFix cod
 **Files Modified**:
 - `packages/server/src/app.ts` - Enhanced run opening logic
 - `packages/core/src/orchestrator/run-manager.ts` - Improved run loading and state healing
+
+**Known limitation (2026-09-27 audit):** the stale-state healing in `run-manager.ts`
+only fires when the run status is *not* `running`. A crash mid-run therefore reloads
+as falsely `running`, and healed agent states are never written back to disk. Crashed
+runs are not reliably classified as interrupted until contract REL-08 is implemented.
 
 ## Architecture Improvements
 
@@ -251,11 +262,14 @@ The health check endpoint returns the number of active runtimes for monitoring p
 
 ## Conclusion
 
-These improvements transform VibeFix from a prototype into a production-grade application with:
-- Robust error handling and recovery
-- Comprehensive logging and monitoring
-- Enhanced reliability and scalability
-- Better resource management
+These improvements moved VibeFix from a prototype toward a hardened application with:
+- Error handling and recovery in several critical paths
+- Centralized logging (without secret redaction — see contract SEC-10)
+- Resource-management improvements (worktree cleanup, atomic evidence writes — the event log is not atomic)
 - Improved maintainability
 
-The system is now ready for production deployment with confidence in its stability and reliability.
+**The system is not production-ready.** As of 2026-09-27 the contract records 15
+contradicted guarantees and 22 open blocker-severity acceptance criteria (no API
+authentication, GitHub-token persistence in clone `.git/config`, verification that can
+auto-pass without a decision provider, no resource ceilings, and others). Release
+conditions are defined exclusively by the gates in `docs/production-contract.md` §10.

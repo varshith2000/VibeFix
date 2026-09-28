@@ -1,0 +1,2506 @@
+# VibeFix production contract — machine-readable form.
+# Generated from docs/production-contract.md (v3.0) and docs/production-acceptance-criteria.md (v2.0).
+# Status mapping note: "blocked" = implementation exists but audit-verified to violate the
+# requirement (the criteria doc's "failing"); the fix is named in implementation_work.
+# All owners are "unassigned" per contract F-01; assignment is release gate GATE-13.
+# Test entries with exists: false are required tests not yet written (test requirement only).
+version: 1
+product:
+  name: VibeFix
+  deployment_model: local-first-single-user
+  status: pre-production
+
+requirements:
+  # ---------- security ----------
+  - id: SEC-001
+    category: security
+    title: Default loopback bind
+    statement: >
+      With no VIBEFIX_HOST set, the server listens on 127.0.0.1:8630 only.
+    status: partially-enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/main.ts:8 (HOST default)
+        - packages/server/src/main.ts:14 (app.listen)
+    tests:
+      - test_file: packages/server/test/bind.test.ts
+        test_name: binds 127.0.0.1 when VIBEFIX_HOST unset
+        exists: false
+    failure_behavior: >
+      Startup bind failure exits non-zero with E_BIND; currently no defined behavior.
+    configuration:
+      required: false
+      source: env VIBEFIX_HOST / VIBEFIX_PORT
+    evidence_required:
+      - "bind.test.ts asserts the listen address (to be created)"
+    owner: unassigned
+  - id: SEC-002
+    category: security
+    title: Remote binding requires opt-in flag and authentication
+    statement: >
+      Non-loopback binding exits E_REMOTE_REFUSED at startup unless VIBEFIX_ALLOW_REMOTE=1
+      is set and SEC-003/SEC-004 are enforced. A log warning alone is not a control.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (startup gate in packages/server/src/main.ts)
+    tests:
+      - test_file: packages/server/test/bind.test.ts
+        test_name: refuses remote bind without opt-in (never listens)
+        exists: false
+    failure_behavior: >
+      Process exits non-zero before binding; refusal names both required conditions.
+    configuration:
+      required: true
+      source: env VIBEFIX_HOST, VIBEFIX_ALLOW_REMOTE (to be added)
+    evidence_required:
+      - refusal test proving the socket never opens
+    owner: unassigned
+    implementation_work:
+      - add startup validation gate in main()
+      - add VIBEFIX_ALLOW_REMOTE env handling
+  - id: SEC-003
+    category: security
+    title: REST endpoint authentication
+    statement: >
+      Every REST route except /api/health requires a bearer token; token generated at
+      first start and stored under ~/.vibefix.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (Fastify onRequest hook, packages/server/src/app.ts)
+    tests:
+      - test_file: packages/server/test/auth.test.ts
+        test_name: all routes return 401 E_AUTH without/with invalid token
+        exists: false
+    failure_behavior: "401 E_AUTH, audit event, no state change."
+    configuration:
+      required: true
+      source: generated token file under ~/.vibefix (to be added)
+    evidence_required:
+      - auth test enumerating every route
+    owner: unassigned
+    implementation_work:
+      - token generation/persistence at first start
+      - onRequest auth hook on all routes except /api/health
+      - token delivery to local UI
+  - id: SEC-004
+    category: security
+    title: WebSocket authentication
+    statement: >
+      /ws upgrades require a ticket issued by an authenticated REST call; unauthorized
+      upgrades are closed with code 4001.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (packages/server/src/app.ts /ws handler)
+    tests:
+      - test_file: packages/server/test/ws-auth.test.ts
+        test_name: unauthorized upgrade closed 4001; authorized accepted
+        exists: false
+    failure_behavior: "Close 4001 + audit event; no frames sent."
+    configuration:
+      required: true
+      source: ticket endpoint (to be added)
+    evidence_required:
+      - ws-auth test
+    owner: unassigned
+    implementation_work:
+      - ticket issuance route
+      - upgrade-time ticket validation
+  - id: SEC-005
+    category: security
+    title: CORS explicit allowlist
+    statement: >
+      Access-Control-Allow-Origin is emitted only for explicitly allowlisted origins
+      (default http://localhost:5173).
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:56 (currently cors origin:true — reflects every origin)
+    tests:
+      - test_file: packages/server/test/cors.test.ts
+        test_name: foreign-origin preflight denied; allowlisted origin allowed
+        exists: false
+    failure_behavior: "No ACAO for foreign origins; preflight denied; audit event."
+    configuration:
+      required: true
+      source: allowlist config (to be added)
+    evidence_required:
+      - cors test with evil-origin preflight
+    owner: unassigned
+    implementation_work:
+      - replace origin:true with configurable allowlist
+  - id: SEC-006
+    category: security
+    title: Project isolation
+    statement: >
+      A project cannot access another project's files or runs; all routes resolve
+      through a persisted project registry; browse is restricted to registered roots.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (registry; current decodePath packages/server/src/projects.ts:63-65 validates nothing)
+    tests:
+      - test_file: packages/server/test/isolation.test.ts
+        test_name: cross-project access attempts return 403/404 with no data
+        exists: false
+    failure_behavior: "403/404 E_SCOPE, audit event, no data returned."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - isolation test across two registered projects
+    owner: unassigned
+    implementation_work:
+      - persisted project registry (id + approved root)
+      - route resolution through registry; restrict /api/fs/browse
+  - id: SEC-007
+    category: security
+    title: Run IDs scoped to projects
+    statement: >
+      Run routes are addressed as /api/projects/:enc/runs/:runId and validated against
+      the owning project.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (current routes keyed globally, packages/server/src/app.ts:344-543)
+    tests:
+      - test_file: packages/server/test/isolation.test.ts
+        test_name: runId of project A under project B prefix returns 404
+        exists: false
+    failure_behavior: "404 E_SCOPE."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - scoping test
+    owner: unassigned
+    implementation_work:
+      - re-route /api/runs/* under project scope with validation
+  - id: SEC-008
+    category: security
+    title: Repository path containment
+    statement: >
+      Repository-relative paths cannot escape the approved root; containment is
+      segment-aware (path.relative check), defeating ../, absolute, and sibling-prefix
+      payloads.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:236-238 (current prefix startsWith check — bypassable)
+    tests:
+      - test_file: packages/server/test/traversal.test.ts
+        test_name: "traversal payloads (../, absolute, sibling-prefix) rejected E_PATH_ESCAPE with no file read"
+        exists: false
+    failure_behavior: "400 E_PATH_ESCAPE; no file accessed; audit event."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - traversal matrix test
+    owner: unassigned
+    implementation_work:
+      - replace startsWith with segment-aware path.relative containment
+  - id: SEC-009
+    category: security
+    title: Symlink escape rejection (one documented exception)
+    statement: >
+      Paths resolving outside the approved root via symlink are rejected with
+      E_PATH_ESCAPE. Single exception: the VibeFix-created worktree node_modules
+      junction, which must be read-only to agents.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (no realpath check exists; junction at packages/core/src/worktree/worktree-manager.ts:123-136)
+    tests:
+      - test_file: packages/server/test/traversal.test.ts
+        test_name: symlinked read and engineer symlinked write rejected; junction exception read-only
+        exists: false
+    failure_behavior: "Rejection with E_PATH_ESCAPE; audit event; no read/write outside root."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - symlink case matrix
+    owner: unassigned
+    implementation_work:
+      - fs.realpath containment on file routes and engineer write targets
+      - make junction read-only to agents
+  - id: SEC-010
+    category: security
+    title: Secret non-exposure (versioned pattern list + canaries)
+    statement: >
+      Secret shapes defined by a versioned redaction pattern list (bearer/basic
+      credentials, x-access-token URLs, KEY=value lines, high-entropy values >20 chars)
+      never appear in logs, URLs, argv, reports, or persisted artifacts. Claim scope is
+      the pattern list plus planted canaries — not arbitrary future formats.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (redact() utility; current logger packages/core/src/util/logger.ts has no redaction)
+    tests:
+      - test_file: packages/server/test/redaction.test.ts
+        test_name: planted canaries absent from logs/events/artifacts/report/argv/.git/config; pattern-list unit tests
+        exists: false
+    failure_behavior: "Redaction failure fails GATE-11; runtime logs a masked placeholder, never the value."
+    configuration:
+      required: false
+      source: versioned pattern list in repo
+    evidence_required:
+      - canary scan across a full pipeline run
+    owner: unassigned
+    implementation_work:
+      - shared redact() at logger/error/event boundaries
+      - versioned pattern list
+  - id: SEC-011
+    category: security
+    title: Secure git credentials
+    statement: >
+      GitHub credentials never persist: clone uses per-invocation http.extraheader (or a
+      scoped credential helper); remote.origin.url is scrubbed to the bare URL after clone.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:147 (current URL userinfo — token lands in clone .git/config)
+    tests:
+      - test_file: packages/server/test/credential.test.ts
+        test_name: post-clone remote.origin.url has no userinfo; argv and stderr contain no token
+        exists: false
+    failure_behavior: "Clone failure returns stderr with userinfo stripped; lingering credential assertion fails loudly."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - credential test after private-repo clone
+    owner: unassigned
+    implementation_work:
+      - switch to extraheader/credential-helper
+      - post-clone remote scrub
+  - id: SEC-012
+    category: security
+    title: Execution policy for untrusted repository code (fail-closed landing)
+    statement: >
+      Repo test/typecheck/lint/build commands do not execute without an approved
+      per-project execution policy. When policy prevents baseline or post-change
+      execution, proposals do not land: the run completes not-verified with changes
+      left on the worktree branch.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/adapters/src/tools/test-runner.ts:53-70 (current: executes by default)
+    tests:
+      - test_file: packages/server/test/exec-policy.test.ts
+        test_name: unapproved commands + passing engineer => nothing lands, status not-verified
+        exists: false
+    failure_behavior: "Unapproved command skipped; gate NOT_APPLICABLE (policy); landing blocked; report discloses not verified."
+    configuration:
+      required: true
+      source: per-project execution policy (to be added)
+    evidence_required:
+      - exec-policy test
+    owner: unassigned
+    implementation_work:
+      - policy model + approval UX
+      - fail-closed gate composition in executeProposal
+  - id: SEC-013
+    category: security
+    title: Auditing of dangerous operations
+    statement: >
+      Every operation in the AUD-002 list emits an audit event carrying the AUD-001
+      field set.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (audit event emission points)
+    tests:
+      - test_file: packages/server/test/audit-events.test.ts
+        test_name: one audit event per dangerous operation with full field set
+        exists: false
+    failure_behavior: "Operation without its event fails the audit test; runtime refusal with E_NO_AUDIT where feasible."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - audit event coverage test
+    owner: unassigned
+    implementation_work:
+      - define audit event schema; emit at clone/registration/config/cleanup/recovery/write sites
+  - id: SEC-014
+    category: security
+    title: Request body validation
+    statement: >
+      Every request body is zod-validated per route; invalid bodies return 400
+      E_INVALID_BODY with the violating path and leave run state untouched.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:305 (only PUT /config validates today)
+    tests:
+      - test_file: packages/server/test/validation.test.ts
+        test_name: malformed bodies to clone/runs/approve/config return 400 E_INVALID_BODY
+        exists: false
+    failure_behavior: "400 naming the schema violation path; no partial application."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - validation matrix test
+    owner: unassigned
+    implementation_work:
+      - zod schema per route mirroring RunEvent payloads
+
+  # ---------- reliability ----------
+  - id: REL-001
+    category: reliability
+    title: Idempotent, atomic state-changing commands
+    statement: >
+      start/approve/reject/abort/resume carry idempotency keys; key check and state
+      transition execute in one critical section under the run lock (REL-014); outcomes
+      persist for replay across restart.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (RunEvent carries no key today, packages/core/src/orchestrator/state.ts:12-29)
+    tests:
+      - test_file: packages/server/test/idempotency.test.ts
+        test_name: sequential replay and N concurrent approvals with one key build exactly one queue
+        exists: false
+    failure_behavior: "Replay returns the original outcome; duplicates never re-dispatch."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - replay + concurrency test
+    owner: unassigned
+    implementation_work:
+      - add idempotencyKey to command routes and RunEvent
+      - seen-key store consulted under the run lock
+  - id: REL-002
+    category: reliability
+    title: Central state-transition validation
+    statement: >
+      All transitions pass the reducer's phase/status guards; stale or out-of-phase
+      events are no-ops with zero effects.
+    status: enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/reducer.ts:25,36,126,138,181-182 (guards)
+        - packages/core/src/orchestrator/runtime.ts:116-121 (terminal ignore)
+    tests:
+      - test_file: packages/core/test/reducer.test.ts
+        test_name: "START is idempotent outside init; stale PHASE_COMPLETED is ignored; CHECKPOINT_APPROVED only valid in awaitingApproval; ignores stale gate verdicts"
+        exists: true
+    failure_behavior: "Stale events produce no effects (tested)."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - reducer.test.ts guard cases green (pnpm test, 2026-09-27)
+    owner: unassigned
+  - id: REL-003
+    category: reliability
+    title: Persist before success is reported
+    statement: >
+      No transition or event is reported or acted on unless durably written; append
+      failures retry, set a degraded flag, and never reuse a sequence number.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/runtime.ts:115-141 (state path: holds)
+        - packages/core/src/store/event-log.ts:57-64 (violates: emits on failed append)
+        - packages/core/src/orchestrator/runtime.ts:276 (violates: memory-only agent failure state)
+        - packages/core/src/orchestrator/run-manager.ts:144 (violates: non-atomic initial write)
+    tests:
+      - test_file: packages/core/test/persistence.test.ts
+        test_name: read-only run dir mid-run yields an error, never success, and no effects
+        exists: false
+    failure_behavior: "Persistence failure surfaces as caller error + run degraded flag + persisted failure record."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - failure-injection persistence test
+    owner: unassigned
+    implementation_work:
+      - retry + degraded flag in EventLog.append; persist healed state; atomic initial write
+  - id: REL-004
+    category: reliability
+    title: Monotonic, never-reused event sequence numbers
+    statement: >
+      Per-run seq is strictly increasing and stable across restart; allocated only on
+      durable write; single writer enforced by REL-014; appends are atomic.
+    status: partially-enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/store/event-log.ts:13,48-54 (counter), 73-84 (line-count recovery)
+    tests:
+      - test_file: packages/core/test/event-log.test.ts
+        test_name: no seq reuse across restart after append failure; no duplicates with two writers
+        exists: false
+    failure_behavior: "Append failure retries then degrades; no emission with an undurable seq."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - seq-continuity test
+    owner: unassigned
+    implementation_work:
+      - atomic append (reuse atomicWrite from evidence-store.ts:158-181)
+      - seq allocation on durable write only
+  - id: REL-005
+    category: reliability
+    title: Exact WebSocket missed-event recovery
+    statement: >
+      Reconnecting clients receive exactly the missed events: server subscribes before
+      the replay read (no gap window) and the client passes since=lastSeq with seq dedup.
+    status: partially-enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:560-585 (replay honored on connect)
+        - packages/ui/src/store.ts:47 (violates target: WS URL omits since)
+    tests:
+      - test_file: packages/server/test/ws-replay.test.ts
+        test_name: reconnect delivers exactly missed events; deterministic connect interleave delivers every event exactly once
+        exists: false
+    failure_behavior: "Any gap or duplicate in the interleave test fails GATE-08."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - interleave + reconnect tests
+    owner: unassigned
+    implementation_work:
+      - subscribe-before-replay server protocol
+      - client passes since and dedups by seq
+  - id: REL-006
+    category: reliability
+    title: REST snapshot recovery
+    statement: >
+      Any run, live or historical, is fully reconstructable via GET /api/runs/:id and
+      /events?since=N from disk; unreadable state returns E_STATE_CORRUPT, never partial data.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:81-101 (diskEvents), 344-369 (routes)
+    tests:
+      - test_file: packages/server/test/rest-recovery.test.ts
+        test_name: post-restart REST returns full state and events
+        exists: false
+    failure_behavior: "Missing run 404; corrupt state 500 E_STATE_CORRUPT (target)."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - restart REST test
+    owner: unassigned
+  - id: REL-007
+    category: reliability
+    title: Restart does not silently lose run state
+    statement: >
+      After kill -9 and restart, load + resume continues the run from persisted state;
+      unrecoverable state yields failed/E_STATE_UNRECOVERABLE, recoverable yields interrupted.
+    status: partially-enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/run-manager.ts:154-187 (loadRun)
+        - packages/core/src/orchestrator/runtime.ts:545-597 (resume)
+    tests:
+      - test_file: packages/core/test/recovery.test.ts
+        test_name: kill -9 mid-run; restart; resume completes from persisted state
+        exists: false
+    failure_behavior: "Unrecoverable => failed with E_STATE_UNRECOVERABLE; recoverable => interrupted + resumable."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - recovery failure-injection test
+    owner: unassigned
+    implementation_work:
+      - close memory-only state gaps (REL-003) and event durability (REL-004)
+  - id: REL-008
+    category: reliability
+    title: Interrupted runs identified after restart
+    statement: >
+      Any run not cleanly shut down (including status "running") loads as interrupted;
+      healed status is persisted; listRuns never shows a phantom active run.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/run-manager.ts:171 (violates: guard skips status "running")
+    tests:
+      - test_file: packages/core/test/recovery.test.ts
+        test_name: kill -9 mid-run then reload reports interrupted, not running
+        exists: false
+    failure_behavior: "Crashed run displays as interrupted and is resumable."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - kill-9 classification test
+    owner: unassigned
+    implementation_work:
+      - persisted clean-shutdown marker; heal all non-clean runs; write healed state back
+  - id: REL-009
+    category: reliability
+    title: Corrupt persistence reported as degraded
+    statement: >
+      Every read path surfaces corruption as a machine-readable degraded indicator
+      (run-level flag + counters via OBS-006); nothing is silently skipped.
+    status: blocked
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/store/evidence-store.ts:100-111 (list surfaces corruption)
+        - packages/core/src/store/evidence-store.ts:117-142 (violates: latest/read silent null)
+        - packages/core/src/store/event-log.ts:35-37 (violates: silent line skip)
+    tests:
+      - test_file: packages/core/test/corruption.test.ts
+        test_name: planted corruption counted and surfaced on every read path
+        exists: false
+    failure_behavior: "Degraded indicator + event; never a silent skip or crash."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - planted-corruption test
+    owner: unassigned
+    implementation_work:
+      - degraded reporting in latest()/read() and event replay
+  - id: REL-010
+    category: reliability
+    title: Failed background work persisted and visible
+    statement: >
+      Approval/reject/abort/resume return 202 + task id; task records persist
+      (accepted/running/failed + error); failures emit events and show in the UI; HTTP
+      never reports success for a failed command.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/server/src/projects.ts:43-51 (violates: track swallows rejections)
+        - packages/server/src/app.ts:390-391 (violates: approve returns ok:true regardless)
+    tests:
+      - test_file: packages/server/test/background-failure.test.ts
+        test_name: approve with induced downstream failure => task failed, run reflects it, no success response
+        exists: false
+    failure_behavior: "Task failed + persisted record + UI visibility."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - failure-injection approval test
+    owner: unassigned
+    implementation_work:
+      - persisted task records + status route + event emission
+  - id: REL-011
+    category: reliability
+    title: Terminal runtime disposal
+    statement: >
+      Completed/failed runtimes are evicted from memory (disk serves reads); startup
+      sweep and periodic retention run; eviction failures retry and surface E_EVICTION.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD (packages/server/src/projects.ts:11 has no eviction path)
+    tests:
+      - test_file: packages/server/test/lifecycle.test.ts
+        test_name: after N completed runs activeRuntimeCount reflects live only; memory flat
+        exists: false
+    failure_behavior: "Eviction failure retried and surfaced, never swallowed."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - lifecycle soak test
+    owner: unassigned
+    implementation_work:
+      - evict on terminal status; startup sweep; bounded cache
+  - id: REL-012
+    category: reliability
+    title: Child process and timer cleanup
+    statement: >
+      Every spawned process is terminated on timeout as a full tree (Windows .cmd
+      shims included); runs sweep children at abort/cleanup.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/adapters/src/tools/git.ts:24-26 (timeout + SIGKILL)
+    tests:
+      - test_file: packages/adapters/test/test-runner.test.ts
+        test_name: timeout kills the process tree on Windows; no orphans
+        exists: false
+    failure_behavior: "Timeout => tree killed, non-ok result, E_PROC_TIMEOUT recorded."
+    configuration:
+      required: false
+      source: per-call timeoutMs (30s/60s/300s defaults)
+    evidence_required:
+      - Windows tree-kill test
+    owner: unassigned
+    implementation_work:
+      - taskkill /T or equivalent; run-level child sweep
+  - id: REL-013
+    category: reliability
+    title: Graceful shutdown including landing
+    statement: >
+      SIGINT/SIGTERM stops intake, settles the dispatch queue, finishes or journals any
+      in-flight landing (SAFE-015), flushes state/events, closes WS, exits 0.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD (packages/server/src/main.ts has no signal handling)
+    tests:
+      - test_file: packages/server/test/shutdown.test.ts
+        test_name: SIGTERM mid-run leaves loadable state and no mid-cherry-pick user repo
+        exists: false
+    failure_behavior: "Shutdown journal guarantees the user repo is never left mid-landing without a recovery record."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - shutdown failure-injection test
+    owner: unassigned
+    implementation_work:
+      - signal handlers + drain + landing journal integration
+  - id: REL-014
+    category: reliability
+    title: Single-writer run lock
+    statement: >
+      Exactly one process may write a run's state/events; second openers get read-only
+      access or E_RUN_LOCKED; stale locks (dead PID) are reclaimed with an audit event.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (no lock exists; two EventLog instances already constructed per run, packages/core/src/orchestrator/run-manager.ts:134,192)
+    tests:
+      - test_file: packages/core/test/run-lock.test.ts
+        test_name: two-process open => E_RUN_LOCKED or read-only; no interleaved appends or duplicate seq
+        exists: false
+    failure_behavior: "E_RUN_LOCKED with holder PID; no interleaved writes."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - concurrent-writer test
+    owner: unassigned
+    implementation_work:
+      - .lock file (O_EXCL/flock) on run open; stale-lock reclamation
+
+  # ---------- behavior-preservation ----------
+  - id: SAFE-001
+    category: behavior-preservation
+    title: Original working tree unmodified before approval
+    statement: >
+      From START through checkpoint, the primary tree's tracked files, HEAD, .git/config,
+      and node_modules are unchanged. Known violations to close: core.longpaths write,
+      node_modules junction, harness baseline running in the user's repo.
+    status: blocked
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/runtime.ts:401 (tracked files: holds — landing is post-approval)
+        - packages/adapters/src/tools/git.ts:112 (violates: writes core.longpaths into user .git/config)
+        - packages/core/src/worktree/worktree-manager.ts:123-136 (violates: junction into user node_modules)
+    tests:
+      - test_file: packages/core/test/primary-tree.test.ts
+        test_name: git status, HEAD, .git/config, node_modules hashes unchanged through checkpoint
+        exists: false
+    failure_behavior: "Any pre-approval primary-tree mutation fails primary-tree.test.ts."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - primary-tree invariance test across the full pre-approval pipeline
+    owner: unassigned
+    implementation_work:
+      - scope longpaths to worktree config or obtain consent
+      - per-worktree node_modules (copy/offline) or read-only junction
+      - baseline execution in a worktree snapshot
+  - id: SAFE-002
+    category: behavior-preservation
+    title: Resolved-path worktree containment
+    statement: >
+      Every engineer write resolves to an absolute path verified segment-aware against
+      the worktree root before writing; escaping paths (../ chains, symlinked targets)
+      are rejected with E_PATH_ESCAPE and recorded as violations.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/agents/src/agents/engineer.ts:66 (violates: path.join with no containment check)
+    tests:
+      - test_file: packages/core/test/containment.test.ts
+        test_name: "scope-matching ..-bearing edit path rejected; nothing written outside the worktree"
+        exists: false
+    failure_behavior: "Escaping write rejected; violation recorded (feeds SAFE-016); attempt fails closed."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - containment matrix test
+    owner: unassigned
+    implementation_work:
+      - resolve + segment-aware prefix check before fs.writeFile
+  - id: SAFE-003
+    category: behavior-preservation
+    title: Worktree starts from a recorded commit
+    statement: >
+      Each attempt records baseCommit (rev-parse at creation) in the ledger; mismatch
+      versus pre-run HEAD fails the attempt with E_BASE_COMMIT.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - packages/adapters/src/tools/git.ts:110-114 (worktree add from HEAD; base not recorded)
+    tests:
+      - test_file: packages/core/test/worktree-base.test.ts
+        test_name: ledger baseCommit equals pre-run HEAD; missing/mismatched => attempt rejected
+        exists: false
+    failure_behavior: "E_BASE_COMMIT; attempt rejected; ledger records it."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - base-commit evidence test
+    owner: unassigned
+    implementation_work:
+      - persist baseCommit in the attempt ledger
+  - id: SAFE-004
+    category: behavior-preservation
+    title: Single-writer capability for code modification
+    statement: >
+      A write capability exists only in the engineer execution context; all other agent
+      contexts structurally lack one; a static CI rule forbids node:fs imports outside
+      engineer/core. OS-level sandboxing is unsupported (see UNSUP-002).
+    status: partially-enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/agents/src/definitions.ts:146 (single worktree-write agent)
+        - packages/core/src/orchestrator/runtime.ts:298-321 (worktree+firewall only in engineer input)
+        - packages/agents/src/contract.ts:12-18 (violates target: identical toolset for all agents)
+    tests:
+      - test_file: packages/agents/test/permissions.test.ts
+        test_name: exactly one worktree-write agent; non-engineer contexts have no write capability; static rule green
+        exists: false
+    failure_behavior: "Non-engineer write is impossible by construction; CI fails on rule violation."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - permission-map + capability test; lint rule
+    owner: unassigned
+    implementation_work:
+      - capability injection replacing shared toolset
+      - lint/AST rule for node:fs imports
+  - id: SAFE-005
+    category: behavior-preservation
+    title: Approved-scope write enforcement
+    statement: >
+      Engineer writes are limited to proposal filesInScope (default-deny), with
+      filesOutOfScope and forbidden zones denied; two violations within one attempt
+      auto-reject it.
+    status: enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/worktree/firewall.ts:35-61 (canWrite + recordViolation)
+        - packages/agents/src/agents/engineer.ts:48-63 (enforcement call site)
+    tests:
+      - test_file: packages/core/test/firewall.test.ts
+        test_name: "allows writes inside declared scope; blocks writes outside scope; blocks explicitly out-of-scope files; auto-rejects after two violations"
+        exists: true
+    failure_behavior: "Denied write => violation artifact; auto-reject at 2 per attempt."
+    configuration:
+      required: false
+      source: proposal filesInScope / filesOutOfScope
+    evidence_required:
+      - firewall.test.ts green (pnpm test, 2026-09-27)
+    owner: unassigned
+  - id: SAFE-006
+    category: behavior-preservation
+    title: Protected paths unmodifiable
+    statement: >
+      Risk-assessor forbidden zones and user protectedPaths cannot be written.
+    status: enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/worktree/firewall.ts:46-48
+        - packages/core/src/orchestrator/runtime.ts:472-486 (zone merge)
+    tests:
+      - test_file: packages/core/test/firewall.test.ts
+        test_name: enforces extra forbidden zones from the Risk Assessor
+        exists: true
+    failure_behavior: "Denial + violation record."
+    configuration:
+      required: false
+      source: per-project protectedPaths (config.json)
+    evidence_required:
+      - firewall.test.ts zone case green
+    owner: unassigned
+  - id: SAFE-007
+    category: behavior-preservation
+    title: Lockfile and dependency-file approval gate
+    statement: >
+      ALWAYS_PROTECTED paths and manifests are denied unless listed verbatim in the
+      user-approved filesInScope.
+    status: enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/worktree/firewall.ts:5-15,35-42
+    tests:
+      - test_file: packages/core/test/firewall.test.ts
+        test_name: "always protects git/vibefix/lockfiles; protects manifests unless explicitly in scope"
+        exists: true
+    failure_behavior: "Denial + violation record."
+    configuration:
+      required: false
+      source: proposal filesInScope (checkpoint-approved)
+    evidence_required:
+      - firewall.test.ts protection cases green
+    owner: unassigned
+  - id: SAFE-008
+    category: behavior-preservation
+    title: Post-approval scope integrity
+    statement: >
+      The approved backlog is hashed at checkpoint; every attempt verifies the hash;
+      mismatch fails closed with E_SCOPE_MUTATED.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/reducer.ts:148-153 (queue fixed from approved ids; no hash check)
+    tests:
+      - test_file: packages/core/test/scope-hash.test.ts
+        test_name: mutated backlog artifact after approval => attempt fails closed
+        exists: false
+    failure_behavior: "E_SCOPE_MUTATED; attempt rejected; audit event."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - backlog-hash test
+    owner: unassigned
+    implementation_work:
+      - hash approved backlog; verify per attempt
+  - id: SAFE-009
+    category: behavior-preservation
+    title: Final diff checked after execution
+    statement: >
+      The verifier firewall-scope gate and sentinel forbidden-zone gate compare the
+      actual worktree diff against scope and zones after the engineer runs.
+    status: partially-enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/agents/src/agents/verifier.ts:38-46 (firewall-scope gate)
+        - packages/agents/src/agents/regression-sentinel.ts (zone check)
+    tests:
+      - test_file: packages/agents/test/verifier-gates.test.ts
+        test_name: planted out-of-scope change => firewall-scope gate FAIL; zone touch => sentinel FAIL
+        exists: false
+    failure_behavior: "Gate FAIL routes to SAFE-011 (no landing)."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - gate unit tests with planted violations
+    owner: unassigned
+  - id: SAFE-010
+    category: behavior-preservation
+    title: Blinded, fail-closed verification
+    statement: >
+      Verification agents never receive the engineer's change-attempt rationale
+      (structural data-flow exclusion), and verification questions with no decision
+      provider fail closed (FAIL/NOT_VERIFIABLE) — nothing lands, run marked
+      not-verified. Model diversity is unsupported this release (UNSUP-001).
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/agents/src/runtime/context-builder.ts:5,16 (fresh-context exclusion)
+        - packages/agents/src/runtime/decision-agent.ts:38-48 (violates: choices[0] fallback auto-passes)
+    tests:
+      - test_file: packages/agents/test/fresh-context.test.ts
+        test_name: "verifier prompts exclude change-attempt rationale; no-provider run lands zero changes and reports not-verified"
+        exists: false
+    failure_behavior: "Unconfigured/misrouted decision capability => zero landed changes, status not-verified."
+    configuration:
+      required: false
+      source: per-project routing (config.json)
+    evidence_required:
+      - no-provider refusal test; prompt-capture test
+    owner: unassigned
+    implementation_work:
+      - fail-closed fallback for verification questions in decide()
+  - id: SAFE-011
+    category: behavior-preservation
+    title: Failed verification prevents completion
+    statement: >
+      A rejected gate verdict triggers retry then defer; the change is never committed
+      or landed; the ledger records it.
+    status: enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/reducer.ts:270-293
+    tests:
+      - test_file: packages/core/test/reducer.test.ts
+        test_name: GATE_VERDICT passed advances the queue; rejected retries then defers
+        exists: true
+    failure_behavior: "Deferred proposal; ledger record; run continues."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - reducer.test.ts verdict cases green
+    owner: unassigned
+  - id: SAFE-012
+    category: behavior-preservation
+    title: Retry limits (3 attempts per change)
+    statement: >
+      Each change gets 1 initial + 2 retries (maxRetriesPerChange=2), then is deferred —
+      never forced.
+    status: enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/reducer.ts:272
+        - packages/schemas/src/routing.ts:48,193 (default)
+    tests:
+      - test_file: packages/core/test/reducer.test.ts
+        test_name: rejected verdict emits retry effect with incremented attempt
+        exists: true
+    failure_behavior: "Defer after budget; ledger updated."
+    configuration:
+      required: false
+      source: routing.budgets.maxRetriesPerChange (per-project config.json)
+    evidence_required:
+      - reducer.test.ts retry cases green
+    owner: unassigned
+  - id: SAFE-013
+    category: behavior-preservation
+    title: Rollback / discard path
+    statement: >
+      Every failure path discards the worktree and branch; cherry-pick conflict aborts
+      leaving the user branch untouched. Hardening: verify post-discard state, retry,
+      surface E_DISCARD_FAILED (current cleanup errors are swallowed).
+    status: enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/runtime.ts:337-350,367,408,423 (discard paths)
+        - packages/core/src/worktree/worktree-manager.ts:76-121 (discard/cleanupAll)
+    tests:
+      - test_file: packages/core/test/e2e.test.ts
+        test_name: rejections do not leave worktrees behind
+        exists: true
+    failure_behavior: "Discard failure retried and surfaced E_DISCARD_FAILED (target)."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - e2e worktree-cleanup case green
+    owner: unassigned
+  - id: SAFE-014
+    category: behavior-preservation
+    title: Human approval gates execution
+    statement: >
+      CHECKPOINT_APPROVED is the only queue-building event and is valid only in
+      awaitingApproval; execution cannot start without it (CLI --yes is the documented
+      explicit operator opt-in).
+    status: enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/reducer.ts:81-87,137-161
+    tests:
+      - test_file: packages/core/test/reducer.test.ts
+        test_name: "CHECKPOINT_APPROVED builds the execution queue; only valid in awaitingApproval; empty approval queue skips execution"
+        exists: true
+    failure_behavior: "Out-of-phase approval is a no-op; queue stays empty."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - reducer.test.ts checkpoint cases green
+    owner: unassigned
+  - id: SAFE-015
+    category: behavior-preservation
+    title: Crash-recoverable landing on the user's repository
+    statement: >
+      Landing writes a pre/post journal; on project open, an in-progress cherry-pick is
+      detected and deterministically completed or aborted, ledger-recorded — the user's
+      branch is never left half-applied without a recovery record.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/src/worktree/worktree-manager.ts:76-81 (cherry-pick in user repo; no journal today)
+    tests:
+      - test_file: packages/core/test/landing-recovery.test.ts
+        test_name: kill during cherry-pick; reopen => user repo clean, ledger states outcome
+        exists: false
+    failure_behavior: "Never a silent half-applied branch; recovery outcome ledger-recorded."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - kill-mid-landing failure-injection test
+    owner: unassigned
+    implementation_work:
+      - land journal (persisted pre/post records) + reopen detection/completion
+  - id: SAFE-016
+    category: behavior-preservation
+    title: Cumulative per-proposal firewall violations
+    statement: >
+      Violations persist per proposalId in the ledger; 2 cumulative violations defer the
+      proposal (the per-attempt counter resets today, letting single probing violations
+      evade auto-reject across the retry budget).
+    status: blocked
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/runtime.ts:306 (violates: fresh ChangeFirewall resets count per attempt)
+    tests:
+      - test_file: packages/core/test/firewall.test.ts
+        test_name: one violation per attempt across attempts => cumulative threshold defers proposal
+        exists: false
+    failure_behavior: "Cumulative threshold => proposal deferred; ledger + report record it."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - cumulative violation test
+    owner: unassigned
+    implementation_work:
+      - persist violation count per proposal; check in advanceExecution
+
+  # ---------- resources ----------
+  - id: RES-001
+    category: resources
+    title: Repository size limit
+    statement: >
+      Repositories above a configured size are rejected at project registration with
+      E_REPO_TOO_LARGE. Value must be set before release (TBD is a release defect).
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/limits.test.ts
+        test_name: oversized repo registration rejected E_REPO_TOO_LARGE
+        exists: false
+    failure_behavior: "Intake refusal message; registration attempt audited."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - intake rejection test
+    owner: unassigned
+    implementation_work:
+      - define value + size probe at registration
+  - id: RES-002
+    category: resources
+    title: Analyzed file-count caps with disclosure
+    statement: >
+      Caps (400 harness files, 25 engineer in-scope files) truncate analysis; truncation
+      is disclosed as degraded (truncatedAt) in the report.
+    status: partially-enforced
+    severity: minor
+    enforcement:
+      locations:
+        - packages/agents/src/agents/harness-builder.ts:38
+        - packages/agents/src/agents/engineer.ts:43
+    tests:
+      - test_file: packages/agents/test/caps.test.ts
+        test_name: repo >400 files => report discloses truncation
+        exists: false
+    failure_behavior: "Current: silent truncation. Target: degraded disclosure persisted in artifact."
+    configuration:
+      required: false
+      source: hardcoded caps
+    evidence_required:
+      - truncation-disclosure test
+    owner: unassigned
+  - id: RES-003
+    category: resources
+    title: Individual file-size caps with disclosure
+    statement: >
+      Files over 200,000 chars are skipped by analysis; the skip is disclosed per file.
+    status: partially-enforced
+    severity: minor
+    enforcement:
+      locations:
+        - packages/agents/src/agents/security-agent.ts:64
+        - packages/agents/src/runtime/context-builder.ts:30
+    tests:
+      - test_file: packages/agents/test/caps.test.ts
+        test_name: "over-200k-char file yields degraded disclosure"
+        exists: false
+    failure_behavior: "Current: silent skip. Target: per-file disclosure."
+    configuration:
+      required: false
+      source: hardcoded caps
+    evidence_required:
+      - disclosure test
+    owner: unassigned
+  - id: RES-004
+    category: resources
+    title: Analysis duration limit
+    statement: >
+      Each analysis phase has a wall-clock budget; expiry fails the phase with
+      E_TIME_BUDGET, retaining partial evidence. Value must be set before release.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (no phase timeout exists)
+    tests:
+      - test_file: packages/core/test/time-budget.test.ts
+        test_name: hung analysis agent => phase fails E_TIME_BUDGET, evidence retained
+        exists: false
+    failure_behavior: "Phase failed; user sees reason; event persisted."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - hung-agent failure-injection test
+    owner: unassigned
+    implementation_work:
+      - phase-level timer + fail transition
+  - id: RES-005
+    category: resources
+    title: Run duration limit
+    statement: >
+      Every run has a wall-clock ceiling; expiry fails the run and discards worktrees.
+      Value must be set before release.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (no run timeout exists)
+    tests:
+      - test_file: packages/core/test/time-budget.test.ts
+        test_name: hung run => failed, worktrees discarded, run.failed event
+        exists: false
+    failure_behavior: "Run failed; reason shown; event persisted."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - hung-run failure-injection test
+    owner: unassigned
+    implementation_work:
+      - run supervisor timer + terminal transition
+  - id: RES-006
+    category: resources
+    title: Child-process duration limits
+    statement: >
+      Spawned commands are killed at timeout (git 30s, commands 60s, tests/clone 300s,
+      LLM HTTP 120s) and the non-ok result surfaces as a gate failure or clone 400.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/adapters/src/tools/git.ts:24,60
+        - packages/adapters/src/tools/test-runner.ts:53
+        - packages/server/src/app.ts:148 (clone 300s)
+        - packages/llm/src/providers/http.ts:12 (120s)
+    tests:
+      - test_file: packages/adapters/test/test-runner.test.ts
+        test_name: sleeper command with 1s timeout killed; non-ok result
+        exists: false
+    failure_behavior: "Kill; non-ok result; exit code + output tail persisted."
+    configuration:
+      required: false
+      source: per-call timeoutMs
+    evidence_required:
+      - timeout test
+    owner: unassigned
+  - id: RES-007
+    category: resources
+    title: Concurrent-run admission control
+    statement: >
+      A numeric cap on concurrent runs; excess starts are queued or rejected
+      E_RUN_LIMIT with queue position shown. Value must be set before release.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (packages/server/src/app.ts:324-327 starts runs with no admission control)
+    tests:
+      - test_file: packages/server/test/limits.test.ts
+        test_name: N+1th run queued or rejected E_RUN_LIMIT
+        exists: false
+    failure_behavior: "Queue/reject with position; event persisted."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - admission test
+    owner: unassigned
+    implementation_work:
+      - run admission semaphore/queue
+  - id: RES-008
+    category: resources
+    title: Agent/pool concurrency cap
+    statement: >
+      At most 3 pool agents execute concurrently per run.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/runtime.ts:25,530-539
+    tests:
+      - test_file: packages/core/test/pool.test.ts
+        test_name: pool of >3 agents runs max 3 concurrently
+        exists: false
+    failure_behavior: "Structural (fixed 16-agent roster); excess queued."
+    configuration:
+      required: false
+      source: POOL_CONCURRENCY constant
+    evidence_required:
+      - pool-cap test
+    owner: unassigned
+  - id: RES-009
+    category: resources
+    title: Retry-count limit
+    statement: >
+      maxRetriesPerChange (default 2) bounds attempts; exhausted changes are deferred.
+    status: enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/reducer.ts:272-292
+    tests:
+      - test_file: packages/core/test/reducer.test.ts
+        test_name: GATE_VERDICT rejected retries then defers
+        exists: true
+    failure_behavior: "Change deferred; run continues; ledger updated."
+    configuration:
+      required: false
+      source: routing.budgets.maxRetriesPerChange (per-project config.json)
+    evidence_required:
+      - reducer.test.ts defer case green
+    owner: unassigned
+  - id: RES-010
+    category: resources
+    title: LLM call-count limit per run
+    statement: >
+      A numeric cap on LLM calls per run; on cap, further calls are skipped (degraded)
+      or the run fails per policy. Value must be set before release.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD (usage metered but no call cap)
+    tests:
+      - test_file: packages/llm/test/caps.test.ts
+        test_name: exceeding call cap stops further calls with disclosed degradation
+        exists: false
+    failure_behavior: "Degraded or failed per policy; user informed; usage persisted."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - call-cap test
+    owner: unassigned
+    implementation_work:
+      - call counter + cap check in router
+  - id: RES-011
+    category: resources
+    title: Output-token caps per call
+    statement: >
+      Provider maxOutputTokens and per-call caps (2,048 loop / 16,384 engineer / 1,500
+      docent) bound generation size.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/schemas/src/routing.ts:80-166 (provider defaults)
+        - packages/agents/src/runtime/text-agent-loop.ts:19
+    tests:
+      - test_file: packages/llm/test/providers.test.ts
+        test_name: request beyond cap sends capped parameter
+        exists: false
+    failure_behavior: "Truncated generation routes to schema-repair path; usage persisted."
+    configuration:
+      required: false
+      source: routing providers (per-project config.json)
+    evidence_required:
+      - provider cap test
+    owner: unassigned
+  - id: RES-012
+    category: resources
+    title: Run token budget
+    statement: >
+      runMaxTokens (default 2,000,000) aborts the run when exceeded; a warning fires at
+      warnFraction (0.8). Defects: checked between effects only; budget.warning never
+      wired; agentMaxTokens unread in code.
+    status: partially-enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/core/src/budget.ts:49-51 (exceeded)
+        - packages/core/src/orchestrator/runtime.ts:177-180 (check site)
+    tests:
+      - test_file: packages/core/test/budget.test.ts
+        test_name: low runMaxTokens => abort "token budget exhausted"; warning event at 80%
+        exists: false
+    failure_behavior: "Run aborted with reason; user sees aborted run; persisted."
+    configuration:
+      required: false
+      source: routing.budgets.runMaxTokens / warnFraction (per-project config.json)
+    evidence_required:
+      - budget-abort test
+    owner: unassigned
+    implementation_work:
+      - wire budget.warning event; enforce or remove agentMaxTokens
+  - id: RES-013
+    category: resources
+    title: Estimated-cost tracking and ceiling
+    statement: >
+      Usage x pricePerMTok yields a per-run cost estimate persisted in the report; a
+      configured ceiling aborts like RES-012. Values must be set before release.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD (price fields exist at packages/schemas/src/routing.ts:31-32 but no cost math)
+    tests:
+      - test_file: packages/llm/test/cost.test.ts
+        test_name: estimate persisted; ceiling breach aborts
+        exists: false
+    failure_behavior: "Ceiling breach aborts; estimate persisted."
+    configuration:
+      required: true
+      source: TBD (prices present; ceiling unset — must be defined)
+    evidence_required:
+      - cost test
+    owner: unassigned
+    implementation_work:
+      - cost computation from metered usage + ceiling check
+  - id: RES-014
+    category: resources
+    title: Worktree count limit
+    statement: >
+      A numeric cap on concurrent worktrees per project; excess attempts queue. Value
+      must be set before release.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD (no cap; cleanup exists at packages/core/src/worktree/worktree-manager.ts:89-121)
+    tests:
+      - test_file: packages/core/test/worktree-cap.test.ts
+        test_name: exceeding cap queues attempts
+        exists: false
+    failure_behavior: "Queued attempts; user sees queue; ledger persisted."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - cap test
+    owner: unassigned
+    implementation_work:
+      - worktree admission cap
+  - id: RES-015
+    category: resources
+    title: Disk-usage limit
+    statement: >
+      A budget over ~/.vibefix (clones + worktrees + runs); breach rejects new
+      runs/clones with E_DISK_BUDGET and surfaces a retention offer. Value must be set
+      before release.
+    status: planned
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (no disk accounting exists)
+    tests:
+      - test_file: packages/server/test/disk-budget.test.ts
+        test_name: near-budget => new run/clone rejected E_DISK_BUDGET with retention offer
+        exists: false
+    failure_behavior: "Rejection + retention offer; event persisted."
+    configuration:
+      required: true
+      source: TBD (limit value unset — must be defined)
+    evidence_required:
+      - disk-exhaustion failure-injection test
+    owner: unassigned
+    implementation_work:
+      - disk accounting + admission check + retention hook
+  - id: RES-016
+    category: resources
+    title: Artifact/report size caps
+    statement: >
+      Per-artifact byte cap with an explicit truncated:true flag surfaced in the UI
+      (current truncation is piecemeal and undisclosed).
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/core/src/orchestrator/runtime.ts:503 (ledger 200k)
+        - packages/adapters/src/tools/test-runner.ts:67 (8k tails)
+    tests:
+      - test_file: packages/core/test/artifact-cap.test.ts
+        test_name: oversized artifact truncated with surfaced flag
+        exists: false
+    failure_behavior: "Truncation disclosed, never silent."
+    configuration:
+      required: true
+      source: TBD (cap value unset — must be defined)
+    evidence_required:
+      - truncation-flag test
+    owner: unassigned
+
+  # ---------- privacy ----------
+  - id: DATA-001
+    category: privacy
+    title: Run data confined to VIBEFIX_HOME
+    statement: >
+      All run state, events, artifacts, worktrees, and clones live under the VibeFix
+      home; no run data is written inside the analyzed repository.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/core/src/store/paths.ts:5-57
+    tests:
+      - test_file: packages/core/test/paths.test.ts
+        test_name: full run writes nothing outside an isolated VIBEFIX_HOME
+        exists: false
+    failure_behavior: "Any write outside home fails the paths test."
+    configuration:
+      required: false
+      source: env VIBEFIX_HOME
+    evidence_required:
+      - filesystem-scope test
+    owner: unassigned
+  - id: DATA-002
+    category: privacy
+    title: Provider payload scope
+    statement: >
+      Only in-scope file contents, diffs, and metadata are sent to providers; env values
+      are never sent; defined secret shapes are redacted before any prompt and the
+      redaction is disclosed in the report.
+    status: blocked
+    severity: critical
+    enforcement:
+      locations:
+        - packages/agents/src/agents/engineer.ts:75-82 (file contents into prompts; no redaction today)
+    tests:
+      - test_file: packages/agents/test/redaction.test.ts
+        test_name: planted secret in in-scope file redacted before provider; .env values absent from captured payloads
+        exists: false
+    failure_behavior: "Redaction miss fails GATE-11 canary."
+    configuration:
+      required: false
+      source: versioned pattern list
+    evidence_required:
+      - mock-provider payload capture test
+    owner: unassigned
+    implementation_work:
+      - redaction pass over file content entering prompts
+  - id: DATA-003
+    category: privacy
+    title: Secret redaction in all outputs
+    statement: >
+      A shared redact() using the versioned pattern list is applied at logger,
+      error-mapper, and event boundaries.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (packages/core/src/util/logger.ts has no redaction)
+    tests:
+      - test_file: packages/core/test/redact.test.ts
+        test_name: token-like strings masked through logger/error/events
+        exists: false
+    failure_behavior: "Masked placeholder logged, never the value."
+    configuration:
+      required: false
+      source: versioned pattern list
+    evidence_required:
+      - redaction unit tests
+    owner: unassigned
+    implementation_work:
+      - implement redact() + wire into boundaries
+  - id: DATA-004
+    category: privacy
+    title: Structural non-persistability of provider requests
+    statement: >
+      Prompts and response bodies cannot be persisted: types are non-serializable into
+      logger/event schemas and a lint rule forbids prompt variables in log calls — the
+      guarantee rests on structure, not on current code behavior.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - TBD (behavioral absence only today; no prompt persistence path exists)
+    tests:
+      - test_file: packages/llm/test/privacy.test.ts
+        test_name: canary prompt absent from all artifacts/events/logs; lint rule green
+        exists: false
+    failure_behavior: "Negative canary test or lint violation fails CI."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - canary + lint proofs
+    owner: unassigned
+    implementation_work:
+      - type separation + lint rule
+  - id: DATA-005
+    category: privacy
+    title: Retention policy
+    statement: >
+      Configurable retention with a crash-safe periodic sweep for runs, worktrees, and
+      clones (today nothing is ever deleted).
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/retention.test.ts
+        test_name: expired data removed per policy after crash-then-restart
+        exists: false
+    failure_behavior: "Sweep failure retried and surfaced."
+    configuration:
+      required: true
+      source: retention config (to be added)
+    evidence_required:
+      - retention sweep test
+    owner: unassigned
+    implementation_work:
+      - retention config + idempotent journaled sweep
+  - id: DATA-006
+    category: privacy
+    title: User deletion of runs and projects
+    statement: >
+      DELETE routes remove run dirs, worktrees, branches, and clones, emitting an audit
+      event; partial deletion reports E_DELETE_PARTIAL listing remains.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (no DELETE route exists)
+    tests:
+      - test_file: packages/server/test/delete.test.ts
+        test_name: DELETE run/project removes all artifacts + audit event
+        exists: false
+    failure_behavior: "E_DELETE_PARTIAL with a list of remains."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - deletion test
+    owner: unassigned
+    implementation_work:
+      - DELETE routes + cascade cleanup + audit events
+  - id: DATA-007
+    category: privacy
+    title: Diagnostics exclude secrets
+    statement: >
+      The diagnostics bundle is built from redacted logs/events/config (keys stripped)
+      and passes a planted-secret scan.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (no bundle exists)
+    tests:
+      - test_file: packages/cli/test/doctor.test.ts
+        test_name: bundle contains no planted secrets
+        exists: false
+    failure_behavior: "Bundle generation refuses on redaction failure."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - planted-secret bundle test
+    owner: unassigned
+    implementation_work:
+      - diagnostics export command
+  - id: DATA-008
+    category: privacy
+    title: API keys env-only
+    statement: >
+      LLM provider keys are read from env and never persisted (structural test
+      required); GitHub tokens are a known violation pending SEC-011.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/llm/src/router.ts:40-41 (env-only read)
+    tests:
+      - test_file: packages/server/test/key-storage.test.ts
+        test_name: full run leaves no LLM key anywhere under ~/.vibefix or artifacts
+        exists: false
+    failure_behavior: "Key discovery fails the test."
+    configuration:
+      required: false
+      source: env / .env at workspace root
+    evidence_required:
+      - key-absence scan test
+    owner: unassigned
+  - id: DATA-009
+    category: privacy
+    title: Prompt/response persistence policy
+    statement: >
+      Prompts are never persisted; model outputs persist only as declared evidence
+      artifacts (audit trail), deletable via DATA-006.
+    status: partially-enforced
+    severity: minor
+    enforcement:
+      locations:
+        - TBD (holds behaviorally today)
+    tests:
+      - test_file: packages/llm/test/privacy.test.ts
+        test_name: run dir contains no prompt bodies; outputs only as artifacts
+        exists: false
+    failure_behavior: "Policy violation fails the privacy test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - run-dir inspection test
+    owner: unassigned
+
+  # ---------- auditability ----------
+  - id: AUD-001
+    category: auditability
+    title: Correlation field set on audited operations
+    statement: >
+      Audited operations carry request ID, command ID, project ID, run ID, agent
+      execution ID, artifact ID, event seq, timestamp, actor, result, and error code.
+      Present today: runId, agentId, artifactId, seq, ts.
+    status: partially-enforced
+    severity: critical
+    enforcement:
+      locations:
+        - packages/schemas/src/events.ts (event fields)
+        - packages/core/src/store/event-log.ts:48-54
+    tests:
+      - test_file: packages/server/test/audit-events.test.ts
+        test_name: full field set present on audited operations
+        exists: false
+    failure_behavior: "Missing field fails the audit test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - field-coverage test
+    owner: unassigned
+    implementation_work:
+      - add request/command/project/execution IDs, actor, result, error codes
+  - id: AUD-002
+    category: auditability
+    title: Audit events for dangerous operations
+    statement: >
+      Project registration, clone, run creation, proposal creation, approval, rejection,
+      abort, agent execution, file write, firewall violation, verification result,
+      cleanup, recovery, and config changes each emit exactly one audit event.
+    status: partially-enforced
+    severity: critical
+    enforcement:
+      locations:
+        - partial coverage via run/checkpoint/agent/verdict events (packages/core/src/orchestrator/reducer.ts effects)
+    tests:
+      - test_file: packages/server/test/audit-events.test.ts
+        test_name: one event per operation in the list
+        exists: false
+    failure_behavior: "Silent operation fails the audit test; runtime E_NO_AUDIT where feasible."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - per-operation coverage test
+    owner: unassigned
+    implementation_work:
+      - emit audit events at clone/registration/config/cleanup/recovery/write sites
+
+  # ---------- observability ----------
+  - id: OBS-001
+    category: observability
+    title: Structured logs
+    statement: >
+      Logs carry level/context fields in a parseable format with secrets redacted
+      (redaction pending SEC-010/DATA-003).
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/core/src/util/logger.ts
+    tests:
+      - test_file: packages/core/test/logger.test.ts
+        test_name: each level parseable; canary absent
+        exists: false
+    failure_behavior: "Unparseable or unredacted output fails the test."
+    configuration:
+      required: false
+      source: env VIBEFIX_LOG
+    evidence_required:
+      - logger format + redaction test
+    owner: unassigned
+  - id: OBS-002
+    category: observability
+    title: Health endpoint accuracy
+    statement: >
+      GET /api/health returns status, version derived from package.json, and a
+      live-only runtime count (current version is hardcoded "0.1.0" and the count is
+      inflated by the REL-011 leak).
+    status: partially-enforced
+    severity: minor
+    enforcement:
+      locations:
+        - packages/server/src/app.ts:121-128
+    tests:
+      - test_file: packages/server/test/health.test.ts
+        test_name: version matches package.json; count reflects live runtimes only
+        exists: false
+    failure_behavior: "Stale/inflated values fail the test."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - health assertion test
+    owner: unassigned
+  - id: OBS-003
+    category: observability
+    title: Readiness check
+    statement: >
+      GET /api/ready distinguishes starting / ready / draining.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/health.test.ts
+        test_name: readiness states correct across startup/shutdown
+        exists: false
+    failure_behavior: "Wrong state reported fails the test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - readiness test
+    owner: unassigned
+    implementation_work:
+      - readiness route tied to lifecycle (REL-013)
+  - id: OBS-004
+    category: observability
+    title: Stable machine-readable error codes
+    statement: >
+      Every failure path returns a documented code (E_AUTH, E_PATH_ESCAPE,
+      E_TIME_BUDGET, E_REMOTE_REFUSED, E_RUN_LOCKED, E_INVALID_BODY, ...).
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD (errors are free-text today)
+    tests:
+      - test_file: packages/server/test/error-codes.test.ts
+        test_name: failure paths emit documented codes
+        exists: false
+    failure_behavior: "Missing code fails the test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - error-code matrix test
+    owner: unassigned
+    implementation_work:
+      - error-code registry applied at all failure paths
+  - id: OBS-005
+    category: observability
+    title: Metrics
+    statement: >
+      Counters for runs started/completed/failed, active runtimes, tokens per provider,
+      worktree count, disk usage, event-log lag.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/metrics.test.ts
+        test_name: counters present and populated under load
+        exists: false
+    failure_behavior: "Missing counter fails the test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - metrics scrape test
+    owner: unassigned
+    implementation_work:
+      - metrics endpoint fed by registry/budget/disk accounting
+  - id: OBS-006
+    category: observability
+    title: Degraded-state indicators
+    statement: >
+      Corruption, truncation, and silent-skip conditions surface as countable
+      indicators via API/UI (feeds REL-009, RES-002/003/016).
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/degraded.test.ts
+        test_name: planted degradation visible in indicators
+        exists: false
+    failure_behavior: "Silent degradation fails the test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - degraded-indicator test
+    owner: unassigned
+    implementation_work:
+      - run-level degraded flags + surfacing
+  - id: OBS-007
+    category: observability
+    title: Diagnostics bundle
+    statement: >
+      Redacted export of logs, events, config (keys stripped), and versions; contains
+      no secrets and no full source contents.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/cli/test/doctor.test.ts
+        test_name: bundle excludes planted secrets and full source
+        exists: false
+    failure_behavior: "Export refuses on redaction failure."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - bundle scan test
+    owner: unassigned
+    implementation_work:
+      - diagnostics export command (see DATA-007)
+  - id: OBS-008
+    category: observability
+    title: Correlation ID propagation
+    statement: >
+      One request traces end-to-end through run, agents, and artifacts via propagated
+      IDs (= AUD-001).
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/audit-events.test.ts
+        test_name: single operation traceable end-to-end
+        exists: false
+    failure_behavior: "Broken chain fails the trace test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - end-to-end trace test
+    owner: unassigned
+    implementation_work:
+      - ID generation/propagation through dispatch and executor
+
+  # ---------- compatibility ----------
+  - id: MIG-001
+    category: compatibility
+    title: Artifact schema versioning and round-trip
+    statement: >
+      Every artifact carries schemaVersion; the codec round-trips valid artifacts and
+      rejects invalid payloads loudly.
+    status: enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/schemas/src/migrations.ts:11-34
+    tests:
+      - test_file: packages/schemas/test/roundtrip.test.ts
+        test_name: "round-trips a valid backlog artifact; rejects an invalid payload loudly"
+        exists: true
+    failure_behavior: "Loud decode error; no silent acceptance."
+    configuration:
+      required: false
+      source: ARTIFACT_SCHEMA_VERSION constant
+    evidence_required:
+      - roundtrip.test.ts green (pnpm test, 2026-09-27)
+    owner: unassigned
+  - id: MIG-002
+    category: compatibility
+    title: State/event schema versioning
+    statement: >
+      state.json and events.ndjson carry a version field; older data migrates or fails
+      loudly; newer data never misparses.
+    status: planned
+    severity: critical
+    enforcement:
+      locations:
+        - TBD (unversioned casts today, packages/core/src/orchestrator/run-manager.ts:160-166)
+    tests:
+      - test_file: packages/core/test/state-version.test.ts
+        test_name: older loads/migrates; newer fails loudly
+        exists: false
+    failure_behavior: "Loud error instructing upgrade; no misparse."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - version matrix test
+    owner: unassigned
+    implementation_work:
+      - version fields + additive-first migration policy for state/events
+  - id: MIG-003
+    category: compatibility
+    title: Migration walk with loud missing-step failure
+    statement: >
+      migrateArtifact walks registered steps; a missing step errors naming the artifact
+      and version.
+    status: partially-enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/schemas/src/migrations.ts:17-34
+    tests:
+      - test_file: packages/schemas/test/migrations.test.ts
+        test_name: missing step => explicit error naming artifact and version
+        exists: false
+    failure_behavior: "Explicit error; no silent skip."
+    configuration:
+      required: false
+      source: migrations registry
+    evidence_required:
+      - migration-walk test
+    owner: unassigned
+  - id: MIG-004
+    category: compatibility
+    title: Backup before upgrade migrations
+    statement: >
+      Version-bumping upgrades copy the project dir to a timestamped backup before any
+      migration write; startup refuses on newer-than-supported on-disk versions.
+      Downgraded from blocker: no prior release exists whose data must survive an
+      upgrade; becomes blocking at release 2.
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/core/test/backup.test.ts
+        test_name: upgrade path creates backup before writes; newer on-disk version refuses startup
+        exists: false
+    failure_behavior: "Refusal with a loud error; backup preserved."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - backup test
+    owner: unassigned
+    implementation_work:
+      - pre-migration backup + version guard
+  - id: MIG-005
+    category: compatibility
+    title: N-1 compatibility
+    statement: >
+      Run directories produced by the previous release load and resume. This release
+      defines the baseline fixture requirement for release 2 (n/a today).
+    status: planned
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/core/test/n-1-compat.test.ts
+        test_name: previous-release fixture run dir loads and resumes
+        exists: false
+    failure_behavior: "Refusal or corruption fails the test."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - N-1 fixture test at release 2
+    owner: unassigned
+    implementation_work:
+      - capture baseline fixture at this release
+  - id: MIG-006
+    category: compatibility
+    title: Unknown schema versions fail loudly
+    statement: >
+      Decoding an artifact stamped with a future schemaVersion hard-errors instructing
+      the user to upgrade; nothing misparses or silently skips.
+    status: enforced
+    severity: major
+    enforcement:
+      locations:
+        - packages/schemas/src/migrations.ts:28-32
+    tests:
+      - test_file: packages/schemas/test/roundtrip.test.ts
+        test_name: rejects unknown future schema versions
+        exists: true
+    failure_behavior: "Hard error; no misparse."
+    configuration:
+      required: false
+      source: ARTIFACT_SCHEMA_VERSION constant
+    evidence_required:
+      - roundtrip unknown-version case green
+    owner: unassigned
+
+  # ---------- unsupported (explicit non-guarantees) ----------
+  - id: UNSUP-001
+    category: behavior-preservation
+    title: Model-diverse verification pool
+    statement: >
+      Verification does not use three distinct providers by default; all gates may
+      share one model (correlation risk documented in SAFE-010).
+    status: unsupported
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/agents/test/fresh-context.test.ts
+        test_name: provider-diversity config honored when set (future)
+        exists: false
+    failure_behavior: "Not applicable — non-guarantee. Single-provider correlation risk is disclosed in the report."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - documented disclosure of single-provider default
+    owner: unassigned
+    unsupported_reason: >
+      Blinded structure is implemented; provider diversity is configurable at best and
+      not enforced this release — stated so no one relies on judge independence.
+  - id: UNSUP-002
+    category: behavior-preservation
+    title: OS-level agent sandbox
+    statement: >
+      Agents are not process-isolated at the OS level; SAFE-004 provides capability
+      injection and a static import rule instead.
+    status: unsupported
+    severity: major
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/agents/test/permissions.test.ts
+        test_name: capability + static-rule enforcement (SAFE-004 scope)
+        exists: false
+    failure_behavior: "Not applicable — non-guarantee; see SAFE-004 for the supported control."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - SAFE-004 evidence stands in for this scope
+    owner: unassigned
+    unsupported_reason: >
+      No OS sandbox (containers/job objects/seccomp) exists; building one is out of
+      scope for the first release.
+  - id: UNSUP-003
+    category: security
+    title: Protection against a malicious local actor
+    statement: >
+      Until SEC-003/004/005 are enforced, any local process or visited webpage can
+      drive the server; the trusted-environment assumption is explicit in the contract.
+    status: unsupported
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/auth.test.ts
+        test_name: auth reduces the local-actor surface (SEC-003 scope)
+        exists: false
+    failure_behavior: "Not applicable — non-guarantee; the contract states the assumption until SEC-003/04/05 land."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - contract trusted-environment statement
+    owner: unassigned
+    unsupported_reason: >
+      Authentication (SEC-003..005) is planned but not implemented; until then the
+      boundary is stated rather than enforced.
+  - id: UNSUP-004
+    category: security
+    title: Remote or multi-user deployment
+    statement: >
+      Remote binding and multi-user operation are out of scope for this release.
+    status: unsupported
+    severity: critical
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/bind.test.ts
+        test_name: remote bind refused without opt-in (SEC-002 scope)
+        exists: false
+    failure_behavior: "Not applicable — non-guarantee; SEC-002 refuses remote binds."
+    configuration:
+      required: false
+      source: TBD
+    evidence_required:
+      - SEC-002 refusal behavior
+    owner: unassigned
+    unsupported_reason: >
+      Local-first single-user deployment model (contract §1); no tenancy or remote
+      access is designed or claimed.
+
+  # ---------- release gates ----------
+  - id: GATE-01
+    category: release
+    title: Clean installation works
+    statement: >
+      On a machine with only Node >= 20, a fresh clone installs and builds.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (procedure unverified)
+    tests:
+      - test_file: docs/production-contract.md
+        test_name: GATE-01 documented clean-install run
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - documented fresh-machine install+build transcript
+    owner: unassigned
+    implementation_work:
+      - perform and document a clean install
+  - id: GATE-02
+    category: release
+    title: Typecheck passes
+    statement: "pnpm typecheck exits zero on the release commit."
+    status: partially-enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - package.json (script typecheck)
+    tests:
+      - test_file: package.json
+        test_name: pnpm typecheck
+        exists: true
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green typecheck run on the release commit
+    owner: unassigned
+  - id: GATE-03
+    category: release
+    title: Lint passes
+    statement: "pnpm lint exits zero; a linter is configured."
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (no linter configured in any package.json)
+    tests:
+      - test_file: package.json
+        test_name: pnpm lint
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - linter configuration + green run
+    owner: unassigned
+    implementation_work:
+      - add linter config and lint script
+  - id: GATE-04
+    category: release
+    title: Build passes
+    statement: "pnpm build exits zero on the release commit."
+    status: partially-enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - package.json (script build)
+    tests:
+      - test_file: package.json
+        test_name: pnpm build
+        exists: true
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green build run
+    owner: unassigned
+  - id: GATE-05
+    category: release
+    title: Test suite passes
+    statement: "pnpm test exits zero (currently 4 files / 31 tests green)."
+    status: partially-enforced
+    severity: blocker
+    enforcement:
+      locations:
+        - package.json (script test)
+    tests:
+      - test_file: packages/core/test/reducer.test.ts
+        test_name: full suite via pnpm test
+        exists: true
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green pnpm test run (verified 2026-09-27: 31/31)
+    owner: unassigned
+  - id: GATE-06
+    category: release
+    title: Security tests pass
+    statement: >
+      auth, ws-auth, cors, isolation, traversal, and validation suites (SEC-003..009,
+      SEC-014) are green.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD (no server tests exist)
+    tests:
+      - test_file: packages/server/test/auth.test.ts
+        test_name: GATE-06 security suite
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green security suites
+    owner: unassigned
+    implementation_work:
+      - create the six security test suites (with the fixes they require)
+  - id: GATE-07
+    category: release
+    title: Restart recovery tests pass
+    statement: >
+      recovery tests green, including kill-mid-run (REL-007/008) and kill-mid-landing
+      (SAFE-015).
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/core/test/recovery.test.ts
+        test_name: GATE-07 recovery suite
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green recovery suite
+    owner: unassigned
+    implementation_work:
+      - implement REL-007/008/SAFE-015 + their tests
+  - id: GATE-08
+    category: release
+    title: WebSocket replay tests pass
+    statement: >
+      ws-replay suite green including the deterministic connect interleave.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/ws-replay.test.ts
+        test_name: GATE-08 WS replay suite
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green WS replay suite
+    owner: unassigned
+    implementation_work:
+      - implement REL-005 protocol + test
+  - id: GATE-09
+    category: release
+    title: Firewall tests pass
+    statement: >
+      firewall.test.ts green plus containment (SAFE-002) and cumulative violations
+      (SAFE-016) cases.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/test/firewall.test.ts
+    tests:
+      - test_file: packages/core/test/firewall.test.ts
+        test_name: "existing 10 cases green; SAFE-002/SAFE-016 cases added"
+        exists: true
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - extended firewall suite green
+    owner: unassigned
+    implementation_work:
+      - add containment and cumulative-violation implementations + cases
+  - id: GATE-10
+    category: release
+    title: Behavior-preservation e2e passes
+    statement: >
+      e2e green plus primary-tree invariance (SAFE-001) and fail-closed no-provider
+      (SAFE-010) cases.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - packages/core/test/e2e.test.ts
+    tests:
+      - test_file: packages/core/test/e2e.test.ts
+        test_name: "existing 2 cases green; SAFE-001/SAFE-010 cases added"
+        exists: true
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - extended e2e suite green
+    owner: unassigned
+    implementation_work:
+      - close SAFE-001/SAFE-010 defects + add cases
+  - id: GATE-11
+    category: release
+    title: Credential redaction tests pass
+    statement: >
+      Planted-canary scan across logs, artifacts, events, argv, and .git/config is
+      green (SEC-010/011, DATA-002/003/007).
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/server/test/redaction.test.ts
+        test_name: GATE-11 canary scan
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - green canary scan
+    owner: unassigned
+    implementation_work:
+      - implement redaction + credential fix + canary test
+  - id: GATE-12
+    category: release
+    title: Resource limits enforced
+    statement: >
+      Tests exercise RES-004/005/007/012/015 with numeric values set (a TBD value at
+      release is a defect).
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - TBD
+    tests:
+      - test_file: packages/core/test/time-budget.test.ts
+        test_name: GATE-12 resource-limit suite
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: true
+      source: TBD (limit values must be defined)
+    evidence_required:
+      - green limit tests with real values
+    owner: unassigned
+    implementation_work:
+      - set 8 TBD values; implement time/concurrency/disk ceilings + tests
+  - id: GATE-13
+    category: release
+    title: Documentation matches implementation
+    statement: >
+      Re-audit confirms status consistency, no readiness claims, and an owner assigned
+      to every blocker.
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - docs/production-contract.md
+    tests:
+      - test_file: docs/production-contract-audit.md
+        test_name: GATE-13 re-audit + owner-assignment check
+        exists: false
+    failure_behavior: "Gate unmet — release blocked."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - re-audit report at the release commit
+    owner: unassigned
+    implementation_work:
+      - assign owners to all blockers; re-audit
+  - id: GATE-14
+    category: release
+    title: No critical known vulnerability remains
+    statement: >
+      All open blocker-severity requirements in this file are closed (enforced with
+      passing tests).
+    status: blocked
+    severity: blocker
+    enforcement:
+      locations:
+        - config/production-contract.yaml (this file is the tracking list)
+    tests:
+      - test_file: config/production-contract.yaml
+        test_name: zero blocker-severity requirements not enforced
+        exists: false
+    failure_behavior: "Gate unmet — the release may not be called production-ready."
+    configuration:
+      required: false
+      source: N/A
+    evidence_required:
+      - this file with all blockers enforced
+    owner: unassigned
+    implementation_work:
+      - close the 22 open blockers enumerated in the criteria summary
