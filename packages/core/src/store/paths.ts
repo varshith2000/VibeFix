@@ -11,9 +11,14 @@ export function vibefixHome(): string {
   return process.env.VIBEFIX_HOME ?? path.join(homedir(), ".vibefix");
 }
 
-/** Stable per-project key: sha1 of the normalized absolute repo path. */
+/**
+ * Stable per-project key: sha1 of the normalized absolute repo path.
+ * Case-folded ONLY on Windows — /home/u/App and /home/u/app are distinct
+ * repositories on case-sensitive filesystems and must not share a key.
+ */
 export function projectKey(repoPath: string): string {
-  const normalized = path.resolve(repoPath).toLowerCase().replace(/\\/g, "/");
+  const resolved = path.resolve(repoPath).replace(/\\/g, "/");
+  const normalized = process.platform === "win32" ? resolved.toLowerCase() : resolved;
   return createHash("sha1").update(normalized).digest("hex").slice(0, 12);
 }
 

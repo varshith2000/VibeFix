@@ -74,7 +74,7 @@ export interface ImportGraph {
 }
 
 export interface CommandRunner {
-  run(command: string, args: string[], options: { cwd: string; timeoutMs?: number }): Promise<ProcessResult>;
+  run(command: string, args: string[], options: { cwd: string; timeoutMs?: number; env?: Record<string, string> }): Promise<ProcessResult>;
 }
 
 /** Test/build execution capability. */

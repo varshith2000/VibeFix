@@ -1,18 +1,19 @@
 import { create } from "zustand";
-import { api } from "./api";
+import { api, encPath } from "./api";
 import type { RunEvent, RunState } from "./types";
 
 type WsStatus = "connecting" | "live" | "offline";
 
 interface RunStore {
   runId: string | null;
+  repoPath: string | null;
   runState: RunState | null;
   events: RunEvent[];
   usage: { total: number; byAgent: Record<string, number>; byProvider: Record<string, number> };
   ws: WebSocket | null;
   wsStatus: WsStatus;
   lastEventAt: number | null;
-  connect(runId: string): void;
+  connect(runId: string, repoPath: string): void;
   disconnect(): void;
   /** REST resync (initial load, WS drop, or polling fallback). Idempotent by eventId. */
   syncEvents(): Promise<void>;
@@ -25,6 +26,7 @@ const EMPTY_USAGE = { total: 0, byAgent: {}, byProvider: {} };
 
 export const useRunStore = create<RunStore>((set, get) => ({
   runId: null,
+  repoPath: null,
   runState: null,
   events: [],
   usage: EMPTY_USAGE,
@@ -32,19 +34,23 @@ export const useRunStore = create<RunStore>((set, get) => ({
   wsStatus: "offline",
   lastEventAt: null,
 
-  connect(runId: string) {
+  connect(runId: string, repoPath: string) {
     get().disconnect();
-    set({ usage: EMPTY_USAGE, events: [], lastEventAt: null, wsStatus: "connecting" });
+    set({ usage: EMPTY_USAGE, events: [], lastEventAt: null, wsStatus: "connecting", runId, repoPath });
     void get().syncEvents(); // durable REST log works even if WS never connects
-    
+
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 10;
     const baseReconnectDelay = 1_000;
     const maxReconnectDelay = 30_000;
-    
+
     const attemptConnection = () => {
       const protocol = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${protocol}://${location.host}/ws?runId=${runId}`);
+      // Project-scoped: the server refuses a runId that does not belong to
+      // the named project (enc), and the token reaches it via the Vite proxy.
+      const ws = new WebSocket(
+        `${protocol}://${location.host}/ws?runId=${encodeURIComponent(runId)}&enc=${encodeURIComponent(encPath(repoPath))}`,
+      );
       
       ws.onopen = () => {
         reconnectAttempts = 0;
@@ -91,16 +97,16 @@ export const useRunStore = create<RunStore>((set, get) => ({
       
       set({ runId, ws });
     };
-    
+
     attemptConnection();
   },
 
   async syncEvents() {
-    const { runId, events } = get();
-    if (!runId) return;
+    const { runId, repoPath, events } = get();
+    if (!runId || !repoPath) return;
     try {
-      const lastSeq = events.length > 0 ? events[events.length - 1].seq : 0;
-      const { events: newEvents } = await api.events(runId, lastSeq);
+      const lastSeq = events.length > 0 ? (events[events.length - 1]?.seq ?? 0) : 0;
+      const { events: newEvents } = await api.events(repoPath, runId, lastSeq);
       if (get().runId !== runId || newEvents.length === 0) return;
       set((s) => {
         const seen = new Set(s.events.map((e) => e.eventId));
@@ -117,7 +123,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
 
   disconnect() {
     const { ws } = get();
-    set({ runId: null, wsStatus: "offline" });
+    set({ runId: null, repoPath: null, wsStatus: "offline" });
     if (ws) {
       ws.onclose = null;
       ws.close();

@@ -20,10 +20,10 @@ function ScoreRing({ label, value }: { label: string; value: number }) {
   );
 }
 
-export function HealthPanel({ runId }: { runId: string }) {
+export function HealthPanel({ repoPath, runId }: { repoPath: string; runId: string }) {
   const { data } = useQuery({
-    queryKey: ["intelligence", runId],
-    queryFn: () => api.intelligence(runId),
+    queryKey: ["intelligence", repoPath, runId],
+    queryFn: () => api.intelligence(repoPath, runId),
     refetchInterval: 4_000,
   });
   const intel: ProjectIntelligence | undefined = data;

@@ -503,25 +503,25 @@ function RunScreen({
   }, [streamWidth]);
 
   useEffect(() => {
-    connect(runId);
+    connect(runId, repoPath);
     return () => useRunStore.getState().disconnect();
-  }, [runId, connect]);
+  }, [runId, repoPath, connect]);
 
   // Polling fallback: even if the WebSocket drops, the UI re-syncs state,
   // usage AND the event stream (the REST log reads from disk too, so this
   // also works for runs whose runtime is no longer live in the server).
   useEffect(() => {
     const timer = setInterval(() => {
-      void api.run(runId).then((s) => useRunStore.getState().applySnapshot(s)).catch((err) => {
+      void api.run(repoPath, runId).then((s) => useRunStore.getState().applySnapshot(s)).catch((err) => {
         console.warn(`[VibeFix] Failed to sync run state: ${err instanceof Error ? err.message : String(err)}`);
       });
-      void api.usage(runId).then((u) => useRunStore.getState().applyUsage(u)).catch((err) => {
+      void api.usage(repoPath, runId).then((u) => useRunStore.getState().applyUsage(u)).catch((err) => {
         console.warn(`[VibeFix] Failed to sync usage: ${err instanceof Error ? err.message : String(err)}`);
       });
       void useRunStore.getState().syncEvents();
     }, 3_000);
     return () => clearInterval(timer);
-  }, [runId]);
+  }, [runId, repoPath]);
 
   const phase = runState?.phase ?? "init";
   const status = runState?.status ?? "running";
@@ -576,7 +576,7 @@ function RunScreen({
           </span>
           <span>committed {runState?.budget.changesCommitted ?? 0}</span>
           <button
-            onClick={() => void api.abort(runId).then(() => queryClient.invalidateQueries())}
+            onClick={() => void api.abort(repoPath, runId).then(() => queryClient.invalidateQueries())}
             className="rounded bg-slate-800 px-2 py-1 text-slate-300 hover:bg-slate-700"
           >
             Abort
@@ -659,11 +659,12 @@ function RunScreen({
                 </div>
               </div>
             )}
-            {activeView === "health" && <HealthPanel runId={runId} />}
+            {activeView === "health" && <HealthPanel repoPath={repoPath} runId={runId} />}
             {activeView === "codebase" && <CodebasePanel repoPath={repoPath} runId={runId} />}
-            {activeView === "findings" && <FindingsPanel runId={runId} />}
+            {activeView === "findings" && <FindingsPanel repoPath={repoPath} runId={runId} />}
             {activeView === "checkpoint" && (
               <CheckpointPanel
+                repoPath={repoPath}
                 runId={runId}
                 onDone={(outcome) => {
                   void queryClient.invalidateQueries();
@@ -673,8 +674,8 @@ function RunScreen({
                 }}
               />
             )}
-            {activeView === "execution" && <ExecutionPanel runId={runId} />}
-            {activeView === "report" && <ReportPanel runId={runId} />}
+            {activeView === "execution" && <ExecutionPanel repoPath={repoPath} runId={runId} />}
+            {activeView === "report" && <ReportPanel repoPath={repoPath} runId={runId} />}
             {activeView === "runs" && (
               <RunsPanel
                 repoPath={repoPath}

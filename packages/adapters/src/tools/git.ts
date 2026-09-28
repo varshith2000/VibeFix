@@ -6,7 +6,7 @@ import type { CommandRunner, ProcessResult } from "../capabilities.js";
 export async function runCommand(
   command: string,
   args: string[],
-  options: { cwd: string; timeoutMs?: number },
+  options: { cwd: string; timeoutMs?: number; env?: Record<string, string> },
 ): Promise<ProcessResult> {
   // Plain executables (git.exe, node.exe) spawn directly — no shell, so args
   // with spaces/quotes survive. Only cmd shims (npm/pnpm/yarn) need a shell,
@@ -15,6 +15,7 @@ export async function runCommand(
   const child = spawn(command, args, {
     cwd: options.cwd,
     windowsHide: true,
+    env: options.env ? { ...process.env, ...options.env } : process.env,
     ...(needsShell ? { shell: true, args: args.map(quoteForCmd) } : {}),
   });
   let stdout = "";

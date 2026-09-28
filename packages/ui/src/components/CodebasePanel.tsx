@@ -12,8 +12,8 @@ export function CodebasePanel({ repoPath, runId }: { repoPath: string; runId: st
   const [tab, setTab] = useState<"files" | "changes">("files");
   const { data } = useQuery({ queryKey: ["tree", repoPath], queryFn: () => api.tree(repoPath) });
   const { data: ledger } = useQuery({
-    queryKey: ["ledger", runId],
-    queryFn: () => api.ledger(runId),
+    queryKey: ["ledger", repoPath, runId],
+    queryFn: () => api.ledger(repoPath, runId),
     refetchInterval: 3_000,
   });
   const entries = ledger?.entries ?? [];

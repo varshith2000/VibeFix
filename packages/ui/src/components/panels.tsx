@@ -21,8 +21,12 @@ export function RiskBadge({ band, value }: { band: string; value: number }) {
   );
 }
 
-export function FindingsPanel({ runId }: { runId: string }) {
-  const { data } = useQuery({ queryKey: ["findings", runId], queryFn: () => api.findings(runId), refetchInterval: 4_000 });
+export function FindingsPanel({ repoPath, runId }: { repoPath: string; runId: string }) {
+  const { data } = useQuery({
+    queryKey: ["findings", repoPath, runId],
+    queryFn: () => api.findings(repoPath, runId),
+    refetchInterval: 4_000,
+  });
   const raw: Finding[] = data?.findings ?? [];
   // Prefer synthesis-merged copy when duplicate IDs appear across producers.
   const byId = new Map<string, Finding>();
@@ -105,9 +109,17 @@ export function FindingsPanel({ runId }: { runId: string }) {
   );
 }
 
-export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: (outcome: "approved" | "rejected") => void }) {
+export function CheckpointPanel({
+  repoPath,
+  runId,
+  onDone,
+}: {
+  repoPath: string;
+  runId: string;
+  onDone: (outcome: "approved" | "rejected") => void;
+}) {
   const queryClient = useQueryClient();
-  const { data } = useQuery({ queryKey: ["backlog", runId], queryFn: () => api.backlog(runId) });
+  const { data } = useQuery({ queryKey: ["backlog", repoPath, runId], queryFn: () => api.backlog(repoPath, runId) });
   const [mode, setMode] = useState("minimal");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [ready, setReady] = useState(false);
@@ -119,12 +131,12 @@ export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: (out
   }
 
   const approve = useMutation({
-    mutationFn: () => api.approve(runId, mode, [...selected]),
+    mutationFn: () => api.approve(repoPath, runId, mode, [...selected]),
     onSuccess: async () => {
       // Pull the fresh run state immediately so the header/status reflect the
       // transition instead of waiting for the next poll tick.
       try {
-        const state = await api.run(runId);
+        const state = await api.run(repoPath, runId);
         useRunStore.getState().applySnapshot(state);
       } catch {
         // WS snapshot / 3s poll will catch up
@@ -134,7 +146,7 @@ export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: (out
     },
   });
   const reject = useMutation({
-    mutationFn: () => api.reject(runId),
+    mutationFn: () => api.reject(repoPath, runId),
     onSuccess: () => onDone("rejected"),
   });
 
@@ -249,8 +261,12 @@ export function CheckpointPanel({ runId, onDone }: { runId: string; onDone: (out
   );
 }
 
-export function ExecutionPanel({ runId }: { runId: string }) {
-  const { data } = useQuery({ queryKey: ["ledger", runId], queryFn: () => api.ledger(runId), refetchInterval: 3_000 });
+export function ExecutionPanel({ repoPath, runId }: { repoPath: string; runId: string }) {
+  const { data } = useQuery({
+    queryKey: ["ledger", repoPath, runId],
+    queryFn: () => api.ledger(repoPath, runId),
+    refetchInterval: 3_000,
+  });
   const entries: LedgerEntry[] = data?.entries ?? [];
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-lg border border-slate-800 bg-ink-900">
@@ -297,8 +313,12 @@ export function ExecutionPanel({ runId }: { runId: string }) {
   );
 }
 
-export function ReportPanel({ runId }: { runId: string }) {
-  const { data, error } = useQuery({ queryKey: ["report", runId], queryFn: () => api.report(runId), retry: false });
+export function ReportPanel({ repoPath, runId }: { repoPath: string; runId: string }) {
+  const { data, error } = useQuery({
+    queryKey: ["report", repoPath, runId],
+    queryFn: () => api.report(repoPath, runId),
+    retry: false,
+  });
   if (error || !data) {
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-slate-800 bg-ink-900 text-xs text-slate-600">

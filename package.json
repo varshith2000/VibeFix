@@ -8,11 +8,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm --filter @vibefix/ui build",
     "clean": "tsc -b --clean",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && pnpm --filter @vibefix/ui typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify": "pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm build",
     "dev:server": "pnpm --filter @vibefix/server dev",
     "dev:ui": "pnpm --filter @vibefix/ui dev",
     "dev": "pnpm --filter @vibefix/server dev",

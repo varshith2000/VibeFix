@@ -2,9 +2,10 @@
 
 **A local-first, multi-agent refactoring control plane for vibe-coded repositories.**
 
-> **Status (2026-09-27):** early development — **not production-ready**. The API has no
-> authentication and the UI must be the only thing talking to the server. See
-> `docs/production-contract.md` for the enforceable contract and its current state.
+> **Status (2026-09-28):** early development — **not production-ready**. The API now
+> requires a bearer token and binds loopback-only by default (see "Security model"
+> below), but runtime-correctness gaps remain. See `docs/production-contract.md` for
+> the enforceable contract and its current state.
 
 VibeFix does not "one-shot fix" your code. It runs a deterministic pipeline of narrow,
 single-responsibility agents whose prime directive is **behavior preservation**:
@@ -93,14 +94,51 @@ node packages/cli/dist/main.js run <repoPath> --mode minimal --yes
 
 ## Configuring models
 
-Keys from environment — LLM provider keys are never persisted. (GitHub clone tokens are
-a known exception today: git stores them in the clone's `.git/config`; tracked as
-SEC-011 in the contract.):
+Keys from environment — LLM provider keys are never persisted. GitHub clone tokens
+travel through a 0600 git-credential-store file that is deleted immediately after
+the clone (never in the `git clone` argv, never in the clone's `.git/config`):
 
 - `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / Ollama at `http://localhost:11434`
 - `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY` (Jev) for decision agents
 
 Per-project routing: `~/.vibefix/projects/<key>/config.json` or ⚙ Settings in the UI.
+
+---
+
+## Security model
+
+VibeFix's API reads your filesystem and drives code modification, so the boundary
+is deliberately tight (risks doc, Phase 2 — all enforced by tests in
+`packages/server/test/security.test.ts`):
+
+- **Loopback-only by default** (`VIBEFIX_HOST` defaults to `127.0.0.1`). Binding a
+  non-loopback interface refuses to start unless BOTH `VIBEFIX_ALLOW_REMOTE=1` and
+  an explicit `VIBEFIX_API_TOKEN` (≥16 chars) are set.
+- **Bearer-token authentication** on every endpoint except `GET /api/health`. The
+  token comes from `VIBEFIX_API_TOKEN` or is generated once and stored (0600) at
+  `~/.vibefix/server-token` — the Vite dev/preview proxy reads that file and
+  injects the header, so the browser never knows the token. Delete the file to
+  rotate. WebSockets accept `?token=` since browsers cannot set headers there.
+- **Origin enforcement + restricted CORS** — only the configured UI origins
+  (default `http://localhost:5173` / `127.0.0.1:5173`, override with
+  `VIBEFIX_UI_ORIGIN`) may call the API; requests carrying any other `Origin`
+  are refused (DNS-rebinding / CSRF defense). Non-browser clients send no Origin
+  and pass.
+- **Project-scoped run URLs** — every run endpoint is
+  `/api/projects/:enc/runs/:runId/...` and the server verifies the run belongs
+  to that project; run IDs are shape-validated (no path traversal).
+- **Path containment by `path.relative`**, never string prefixes (the
+  `project` vs `project-secrets` collision), with symlink resolution and
+  re-checking.
+- **Rate limits & ceilings** — 600 req/min per client globally, 10 clones/min,
+  max 2 concurrent clones, max 4 concurrent active runs
+  (`VIBEFIX_MAX_ACTIVE_RUNS`), 1 MiB request bodies.
+- **Clone URL allowlist** — HTTPS GitHub only by default; extra hosts via
+  `VIBEFIX_CLONE_HOSTS`. URLs with embedded credentials are rejected.
+
+The local folder browser (`/api/fs/browse`) can still browse the whole disk —
+that is its job as the project picker; the bearer token is the boundary that
+keeps it local-user-only.
 
 ---
 
@@ -126,3 +164,18 @@ packages/
 ```bash
 pnpm test    # reducer, firewall, schema round-trip, full E2E over a fixture repo
 ```
+
+## Verification
+
+The full verification chain (what CI runs on every push and pull request —
+`.github/workflows/ci.yml`, Ubuntu and Windows):
+
+```bash
+pnpm verify   # install --frozen-lockfile && typecheck && test && build
+```
+
+`pnpm typecheck` covers every package, including the UI (which is excluded from
+the root `tsc -b` project graph because it is a non-composite Vite project — it
+has its own `typecheck` script that the root script invokes). Do not treat a
+change as verified until `pnpm verify` is green from a clean checkout.
+
