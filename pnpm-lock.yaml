@@ -68,6 +68,9 @@ importers:
       '@vibefix/adapters':
         specifier: workspace:*
         version: link:../adapters
+      '@vibefix/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@vibefix/schemas':
         specifier: workspace:*
         version: link:../schemas
@@ -75,15 +78,15 @@ importers:
       '@vibefix/agents':
         specifier: workspace:*
         version: link:../agents
-      '@vibefix/fixture-repo':
+      '@vibefix/test-fixtures':
         specifier: workspace:*
-        version: link:../fixture-repo
+        version: link:../test-fixtures
 
-  packages/fixture-repo:
+  packages/domain:
     dependencies:
-      '@vibefix/adapters':
+      '@vibefix/schemas':
         specifier: workspace:*
-        version: link:../adapters
+        version: link:../schemas
 
   packages/llm:
     dependencies:
@@ -133,6 +136,12 @@ importers:
       tsx:
         specifier: ^4.16.2
         version: 4.23.13
+
+  packages/test-fixtures:
+    dependencies:
+      '@vibefix/adapters':
+        specifier: workspace:*
+        version: link:../adapters
 
   packages/ui:
     dependencies:

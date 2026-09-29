@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { runCommand } from "@vibefix/adapters";
 
-export type FixtureProfile = "small-mess" | "medium-mess" | "polyglot";
+export type FixtureProfile = "small-mess" | "medium-mess" | "polyglot" | "malicious-paths" | "large-repo" | "failure-scenarios";
 
 export interface FixtureOptions {
   seed?: number;
@@ -23,6 +23,15 @@ export async function createFixtureRepo(dir: string, options: FixtureOptions = {
       break;
     case "polyglot":
       await writePolyglot(dir);
+      break;
+    case "malicious-paths":
+      await writeMaliciousPaths(dir);
+      break;
+    case "large-repo":
+      await writeLargeRepo(dir);
+      break;
+    case "failure-scenarios":
+      await writeFailureScenarios(dir);
       break;
     case "small-mess":
     default:
@@ -282,4 +291,45 @@ async function writePolyglot(dir: string): Promise<void> {
     ].join("\n"),
   );
   await write(dir, "requirements.txt", "requests==2.32.0\n");
+}
+
+async function writeMaliciousPaths(dir: string): Promise<void> {
+  await write(dir, "package.json", JSON.stringify({ name: "hostile-fixture", version: "1.0.0", private: true }, null, 2) + "\n");
+  await write(
+    dir,
+    "src/unsafe-handler.js",
+    [
+      "const path = require('node:path');",
+      "const { exec } = require('node:child_process');",
+      "function readRequestedFile(root, requested) {",
+      "  return require('node:fs').readFileSync(path.join(root, requested), 'utf8');",
+      "}",
+      "function runRequestedCommand(command) { exec(command); }",
+      "module.exports = { readRequestedFile, runRequestedCommand };",
+      "",
+    ].join("\n"),
+  );
+  await write(dir, "README.md", "# Hostile path fixture\n\nStatic analysis fixture containing unsafe path and process patterns.\n");
+}
+
+async function writeLargeRepo(dir: string): Promise<void> {
+  await writeSmallMess(dir);
+  await Promise.all(Array.from({ length: 128 }, async (_, index) => {
+    const name = String(index).padStart(3, "0");
+    await write(dir, `src/generated/module-${name}.js`, `module.exports = { index: ${index} };\n`);
+  }));
+}
+
+async function writeFailureScenarios(dir: string): Promise<void> {
+  await write(
+    dir,
+    "package.json",
+    JSON.stringify(
+      { name: "failing-fixture", version: "1.0.0", private: true, scripts: { build: "node scripts/fail.js", test: "node scripts/fail.js" } },
+      null,
+      2,
+    ) + "\n",
+  );
+  await write(dir, "scripts/fail.js", "process.stderr.write('fixture failure\\n');\nprocess.exitCode = 1;\n");
+  await write(dir, "README.md", "# Failure fixture\n\nBuild and test commands intentionally exit unsuccessfully.\n");
 }

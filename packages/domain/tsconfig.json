@@ -6,8 +6,6 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "../domain" },
-    { "path": "../schemas" },
-    { "path": "../adapters" }
+    { "path": "../schemas" }
   ]
 }

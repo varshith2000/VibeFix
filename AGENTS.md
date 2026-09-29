@@ -33,23 +33,25 @@ change or extend that test in the same commit.
 | Capability | Where | Proving test |
 |---|---|---|
 | Verifiable build/test baseline | root `verify` script (install --frozen-lockfile → typecheck → test → build, incl. UI) | locally green (`pnpm verify`); CI workflow `.github/workflows/ci.yml` (Ubuntu + Windows matrix) runs it on every push/PR — the Windows leg is locally verified, the Ubuntu leg first proves itself on the first pushed commit |
-| Deterministic reducer state machine (guards, retries, defers, checkpoint gating) | `packages/core/src/orchestrator/reducer.ts` | `packages/core/test/reducer.test.ts` |
+| Deterministic reducer state machine (guards, retries, defers, checkpoint gating) | `packages/domain/src/reducer.ts`; compatibility export from `core` | `packages/core/test/reducer.test.ts` |
 | Change Firewall (scope deny-by-default, protected paths, lockfiles, auto-reject) | `packages/core/src/worktree/firewall.ts` | `packages/core/test/firewall.test.ts` |
 | Artifact schema versioning + migration walk rejection | `packages/schemas/src/migrations.ts` | `packages/schemas/test/roundtrip.test.ts` |
 | Full pipeline end-to-end over a fixture repo (real git worktrees, landing, cleanup-on-rejection) | executor + orchestrator | `packages/core/test/e2e.test.ts` |
-| Bearer-token auth on every endpoint except `/api/health`; timing-safe compare | `packages/server/src/security.ts` | `packages/server/test/security.test.ts` (auth block) |
-| Binding guard: non-loopback host refuses to start without `VIBEFIX_ALLOW_REMOTE=1` AND an explicit ≥16-char token | `security.ts` `assertBindingAllowed` | `security.test.ts` (binding guard block) |
-| CORS allowlist + foreign-`Origin` refusal (DNS-rebinding/CSRF) | `security.ts` `originCheckHook` | `security.test.ts` (origin block) |
-| Path containment by `path.relative` (no string-prefix collision) + symlink realpath re-check | `security.ts` `isPathInside`; `/file` route | `security.test.ts` (filesystem containment block) |
-| Project-scoped run URLs; cross-project run access is 404; runId shape validation | `app.ts` `resolveRun` | `security.test.ts` (project-scoped runs block) |
-| Secure git clone credentials: token via 0600 credential-store file (never argv, never `.git/config`), atomic target reservation, stderr scrubbing | `app.ts` clone route; `security.ts` | `security.test.ts` (clone block) + live smoke (zero residue) |
-| Rate limits (600 req/min, 10 clones/min) and ceilings (≤2 concurrent clones, ≤4 active runs, 1 MiB bodies) | `security.ts` `RateLimiter`; `app.ts` | `security.test.ts` (rate limiting + run ceiling) |
-| Approval failures return HTTP 500 (never `ok:true` over a broken dispatch) | `app.ts` approve route | `packages/server/test/runtime-correctness.test.ts` |
+| Reducer/domain and server boundaries (domain state machine; composed route plugins; dedicated auth, policy, and WebSocket modules) | `packages/domain`; `packages/server/src/routes`; `auth`; `policies`; `websocket`; `app.ts` | `packages/core/test/reducer.test.ts`; `packages/server/test/app-composition.test.ts` |
+| Deterministic hostile, large, and failing repository fixtures | `packages/test-fixtures` | `packages/test-fixtures/test/profiles.test.ts` |
+| Bearer-token auth on every endpoint except `/api/health`; timing-safe compare | `packages/server/src/auth/token-auth.ts`; compatibility exports in `security.ts` | `packages/server/test/security.test.ts` (auth block) |
+| Binding guard: non-loopback host refuses to start without `VIBEFIX_ALLOW_REMOTE=1` AND an explicit ≥16-char token | `auth/permissions.ts` `assertBindingAllowed` | `security.test.ts` (binding guard block) |
+| CORS allowlist + foreign-`Origin` refusal (DNS-rebinding/CSRF) | `policies/origin-policy.ts` | `security.test.ts` (origin block) |
+| Path containment by `path.relative` (no string-prefix collision) + symlink realpath re-check | `policies/path-policy.ts`; repository file route | `security.test.ts` (filesystem containment block) |
+| Project-scoped run URLs; cross-project run access is 404; runId shape validation | `context.ts` `resolveRun`; `policies/resource-policy.ts` | `security.test.ts` (project-scoped runs block) |
+| Secure git clone credentials: token via 0600 credential-store file (never argv, never `.git/config`), atomic target reservation, stderr scrubbing | `routes/projects.ts`; `policies/resource-policy.ts` | `security.test.ts` (clone block) + live smoke (zero residue) |
+| Rate limits (600 req/min, 10 clones/min) and ceilings (≤2 concurrent clones, ≤4 active runs, 1 MiB bodies) | `policies/resource-policy.ts`; `context.ts`; `app.ts` | `security.test.ts` (rate limiting + run ceiling) |
+| Approval failures return HTTP 500 (never `ok:true` over a broken dispatch) | `routes/approvals.ts` | `packages/server/test/runtime-correctness.test.ts` |
 | Background dispatch failures force-fail the run (FATAL) and are counted in `/api/health` | `projects.ts` `track()` | `runtime-correctness.test.ts` |
 | Terminal runtimes are unregistered after background settle (disk keeps serving) | `projects.ts` `watchForTerminal` | `runtime-correctness.test.ts` |
-| WS replay→live handoff without loss or duplication (subscribe-first bridge) | `packages/server/src/ws-replay.ts` | `runtime-correctness.test.ts` (bridge block) |
-| Idempotency keys on approve/reject/abort/resume (replay original 200) | `app.ts` | `runtime-correctness.test.ts` |
-| Explicit recovery degradation: corrupt event lines counted, corrupt `state.json` → 500 `{degraded}`, unpersisted events flagged | `event-log.ts`; `app.ts` | `runtime-correctness.test.ts` (degradation block) |
+| WS replay→live handoff without loss or duplication (subscribe-first bridge) | `packages/server/src/websocket/replay.ts`; compatibility export in `ws-replay.ts` | `runtime-correctness.test.ts` (bridge block) |
+| Idempotency keys on approve/reject/abort/resume (replay original 200) | `routes/approvals.ts`; `context.ts` | `runtime-correctness.test.ts` |
+| Explicit recovery degradation: corrupt event lines counted, corrupt `state.json` → 500 `{degraded}`, unpersisted events flagged | `event-log.ts`; `context.ts`; `routes/runs.ts`; `websocket/gateway.ts` | `runtime-correctness.test.ts` (degradation block) |
 | TS-AST code metrics with analyzer labels (`ts-ast` / `regex-heuristic`) | `adapters/src/tools/code-metrics.ts` | `packages/adapters/test/analysis.test.ts` |
 | Import graph via TypeScript module resolution (tsconfig paths, dynamic imports, export-from); regex fallback labeled | `adapters/src/tools/import-graph.ts` | `analysis.test.ts` |
 | LLM findings validated against the file snapshot (hallucinated locations rejected; unverifiable evidence demoted) | `agents/src/shared/findings.ts` | `packages/agents/test/finding-validation.test.ts` |

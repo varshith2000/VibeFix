@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { RunManager, runPaths, type RunServices } from "../src/index.js";
 import { VibefixExecutor } from "@vibefix/agents";
-import { createFixtureRepo } from "@vibefix/fixture-repo";
+import { createFixtureRepo } from "@vibefix/test-fixtures";
 
 const dirs: string[] = [];
 

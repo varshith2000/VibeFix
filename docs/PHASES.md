@@ -46,13 +46,13 @@ every security issue.
 
 | Item | Result |
 |---|---|
-| Security module | `packages/server/src/security.ts` — token generation/persistence (`~/.vibefix/server-token`, 0600; `VIBEFIX_API_TOKEN` wins), timing-safe compare, auth hook, origin-check hook (DNS-rebinding/CSRF), fixed-window `RateLimiter`, `isPathInside` (path.relative), run-ID shape validation, `parseCloneUrl` allowlist (rejects embedded credentials), credential-file body format, `scrubSecret`, `assertBindingAllowed` |
+| Security modules | `packages/server/src/auth` — token generation/persistence, timing-safe compare, auth hook, binding guard; `packages/server/src/policies` — origin checks, fixed-window `RateLimiter`, path containment, run-ID shape, clone URL allowlist, credential-file format, secret scrubbing. `security.ts` remains a compatibility barrel |
 | Auth on every endpoint | All routes except `GET /api/health` require `Authorization: Bearer`, `X-VibeFix-Token`, or `?token=` (WS) — enforced by an onRequest hook |
 | Binding guard | Non-loopback `VIBEFIX_HOST` refuses to start without BOTH `VIBEFIX_ALLOW_REMOTE=1` and an explicit ≥16-char token |
 | CORS / origins | Only configured UI origins; foreign `Origin` headers get 403 regardless of CORS |
 | Path containment | `/file` endpoint: realpath + `path.relative` containment with symlink re-check (fixes `project` vs `project-secrets` prefix collision) |
-| Project-scoped runs | Every run route is `/api/projects/:enc/runs/:runId/...`; `resolveRun` verifies live-runtime↔project match or on-disk location; whole-disk `findRunDir` scan removed |
-| Secure Git credentials | Token travels via a 0600 git-credential-store temp file (deleted in `finally`), never in argv; clean canonical clone URL; stderr scrubbed; atomic `mkdir` reservation kills the clone-name race; also fixes contract SEC-011 (token in `.git/config`) |
+| Project-scoped runs | Every run route is `/api/projects/:enc/runs/:runId/...`; `context.ts` `resolveRun` verifies live-runtime↔project match or on-disk location; whole-disk `findRunDir` scan removed |
+| Secure Git credentials | `routes/projects.ts` uses a 0600 git-credential-store temp file (deleted in `finally`), never argv; clean canonical clone URL; stderr scrubbed; atomic `mkdir` reservation kills the clone-name race; also fixes contract SEC-011 (token in `.git/config`) |
 | Rate/resource limits | 600 req/min global, 10 clones/min, ≤2 concurrent clones, ≤4 active runs (`VIBEFIX_MAX_ACTIVE_RUNS`), 1 MiB body limit |
 | Token delivery | Vite dev/preview proxy reads the same token file and injects the header (HTTP + WS upgrade) — the browser never knows the token |
 | Tests | `packages/server/test/security.test.ts` — 37 tests: auth matrix, origin/CORS, traversal + prefix collision + absolute paths, cross-project run access, runId traversal, credential URL rejection, scrubbing, rate limit 429, run ceiling, binding guard, token persistence |
@@ -79,10 +79,10 @@ is the same subsystem and was included.)
 
 | Item | Result |
 |---|---|
-| No more silent approval success | `POST .../approve` awaits `runtime.dispatch(...)` directly in try/catch — a failed approval is an HTTP 500, never `{ok:true}` (`app.ts`) |
+| No more silent approval success | `POST .../approve` awaits `runtime.dispatch(...)` directly in try/catch — a failed approval is an HTTP 500, never `{ok:true}` (`routes/approvals.ts`) |
 | Background failures persisted | `ProjectRegistry.track()` no longer swallows: on rejection it records the failure (bounded map, surfaced via `/api/health` `backgroundFailures` and `failureFor()`) and force-fails the run through the reducer (`FATAL` → status `failed`, `run.failed` event, worktree cleanup) |
 | Terminal runtimes unregistered | `registerRuntime` subscribes to the run's events; on `run.completed` / `run.failed` / `run.aborted` / `run.nochanges` (or registration of an already-terminal run) the runtime is dropped after background work settles. Disk-backed serving keeps everything readable; the health count is now truthful; no more unbounded memory growth |
-| WS replay/subscribe race fixed | New `packages/server/src/ws-replay.ts` — `bridgeReplayToLive` subscribes FIRST into a buffer, replays history, flushes the buffer (dedup by eventId), then goes live. Events appended between the replay query and the subscription can no longer be lost. Used by the `/ws` handler with snapshot-on-change via `onLiveEvent` |
+| WS replay/subscribe race fixed | `packages/server/src/websocket/replay.ts` — `bridgeReplayToLive` subscribes FIRST into a buffer, replays history, flushes the buffer (dedup by eventId), then goes live. Events appended between the replay query and the subscription can no longer be lost. Used by `websocket/gateway.ts` with snapshot-on-change via `onLiveEvent`; `ws-replay.ts` remains a compatibility barrel |
 | Sequence-gap recovery (UI) | `store.ts` `pushEvent` detects `seq > lastSeq + 1` and triggers `resyncAfterGap()` — pulls missed events from the durable REST log plus a fresh authoritative snapshot |
 | Reconnect lifecycle (UI) | `connectionGeneration` + retained `reconnectTimer`: every connect/disconnect bumps the generation; timers and socket callbacks no-op unless current; `disconnect()` cancels the pending timer. No more orphaned reconnects for a previous run |
 | Explicit degradation | `EventLog` counts failed appends (`persistenceFailures`, `degraded`) and corrupt lines (`replaySince` returns `corruptLines`); `GET .../events` responds with `corruptLineCount` / `replayDegraded` / `persistenceFailures`; corrupt `state.json` is a 500 `{degraded:true}` instead of a silent 404; `/ws` sends `{t:"degraded"}` frames; the UI shows a "⚠ replay degraded" badge (`EventStream`) |
@@ -157,6 +157,29 @@ against the post-repair tree, and assigning Owners (GATE-13). Both are named
 as open work inside the documents rather than silently claimed.
 
 ---
+
+## Architecture Boundaries — Follow-Up (2026-09-29)
+
+The conceptual package split and server route split have since been formalized.
+This is a structural follow-up to the five-phase repair program, not a claim
+that the remaining production-contract gates are closed.
+
+| Boundary | Current implementation | Verification |
+|---|---|---|
+| Domain state machine | `packages/domain` owns pure transition types, initial-state construction, cloning, and reducer; `core` re-exports the API for compatibility | `packages/core/test/reducer.test.ts` |
+| Server composition | `app.ts` configures Fastify, security hooks and plugins, constructs `ServerContext`, then registers focused route modules | `packages/server/test/app-composition.test.ts`; server suite |
+| Endpoint ownership | health, projects, repositories, runs, findings, artifacts, and approvals each have a route module | existing security, validation, runtime-correctness, and open-project server tests |
+| Security boundaries | token auth and binding guard are under `auth`; origin, path, and resource limits/validation are under `policies`; `security.ts` is a compatibility barrel | `packages/server/test/security.test.ts` |
+| WebSocket boundary | `websocket/gateway.ts` owns the socket route; protocol event classification and replay-to-live handoff are separate modules | `packages/server/test/runtime-correctness.test.ts` |
+| Fixture boundary | `packages/test-fixtures` provides messy, polyglot, hostile-pattern, large, and failing-command repositories | `packages/test-fixtures/test/profiles.test.ts`; `packages/core/test/e2e.test.ts` |
+
+**Still deliberately local-only:** bearer authentication is not role-based
+authorization, and the API is not multi-user or tenant-scoped. Live run access
+is project-scoped by `ProjectRegistry.runtimeForProject` and `resolveRun`;
+historical files are resolved beneath the project run directory. Centralized
+HTTP error modules were not added because route-specific response shapes are
+part of the existing API contract and there was no shared handler behavior to
+extract without changing that contract.
 
 ## Bottom line
 

@@ -10,7 +10,7 @@ import { EvidenceStore } from "../store/evidence-store.js";
 import { configPath, runPaths, runsDir } from "../store/paths.js";
 import type { AgentExecutorPort } from "./ports.js";
 import { OrchestratorRuntime } from "./runtime.js";
-import { createInitialRunState } from "./state.js";
+import { createInitialRunState } from "@vibefix/domain";
 import { WorktreeManager } from "../worktree/worktree-manager.js";
 import { debug, info, warn, error } from "../util/logger.js";
 

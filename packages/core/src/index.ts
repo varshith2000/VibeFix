@@ -1,7 +1,6 @@
 // Orchestrator
-export { reduce } from "./orchestrator/reducer.js";
-export type { RunEvent, Effect, AgentRegistrySnapshot } from "./orchestrator/state.js";
-export { createInitialRunState, cloneState } from "./orchestrator/state.js";
+export { reduce, createInitialRunState, cloneState } from "@vibefix/domain";
+export type { RunEvent, Effect, AgentRegistrySnapshot } from "@vibefix/domain";
 export type { AgentExecutionInput, AgentExecutionOutcome, AgentExecutorPort } from "./orchestrator/ports.js";
 export { OrchestratorRuntime } from "./orchestrator/runtime.js";
 export { RunManager, loadRepoConfig, saveRepoConfig } from "./orchestrator/run-manager.js";

@@ -1,7 +1,8 @@
 import { buildApp } from "./app.js";
 import { ProjectRegistry } from "./projects.js";
 import { loadEnvFile } from "./env.js";
-import { assertBindingAllowed, tokenFilePath } from "./security.js";
+import { assertBindingAllowed } from "./auth/permissions.js";
+import { tokenFilePath } from "./auth/token-auth.js";
 import { pathToFileURL } from "node:url";
 
 loadEnvFile(); // keys live in .env at the workspace root (gitignored)

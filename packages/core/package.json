@@ -18,11 +18,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@vibefix/domain": "workspace:*",
     "@vibefix/schemas": "workspace:*",
     "@vibefix/adapters": "workspace:*"
   },
   "devDependencies": {
     "@vibefix/agents": "workspace:*",
-    "@vibefix/fixture-repo": "workspace:*"
+    "@vibefix/test-fixtures": "workspace:*"
   }
 }

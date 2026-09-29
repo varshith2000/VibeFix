@@ -1,7 +1,7 @@
 {
-  "name": "@vibefix/fixture-repo",
+  "name": "@vibefix/test-fixtures",
   "version": "0.1.0",
-  "description": "Deterministic messy-repo generator for testing VibeFix end-to-end",
+  "description": "Deterministic messy, hostile, large, and failing repositories for tests",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
