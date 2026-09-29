@@ -35,12 +35,17 @@ export async function decide(
   return { answers: deterministicAnswers(request), degraded: true };
 }
 
+export function isAffirmativeDecision(
+  degraded: boolean,
+  answer: DecisionAnswer | undefined,
+): boolean {
+  return !degraded && answer?.kind === "choice" && answer.choice === "yes";
+}
+
 function deterministicAnswers(request: Omit<DecisionRequest, "metadata">): DecisionAnswer[] {
   return request.questions.map((q, i) => {
     if (q.type === "choice") {
-      // "reject/conservative" style choices sort last alphabetically here;
-      // picking the first choice is the neutral deterministic default.
-      return { questionIndex: i, kind: "choice", choice: q.choices[0]!, confidence: 0.3 };
+      return { questionIndex: i, kind: "noul", reason: "decision provider unavailable" };
     }
     const mid = (q.scale.min + q.scale.max) / 2;
     return { questionIndex: i, kind: "score", scores: q.items.map(() => mid) };

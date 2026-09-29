@@ -277,11 +277,19 @@ describe("explicit recovery degradation", () => {
 
   it("flags live events that were never persisted (persistence failure)", async () => {
     const repo = path.join(home, "repoK");
-    // Point the log at a directory that does not exist: appends fail, but the
-    // in-memory bus still delivers — the run must be reported as degraded.
-    const log = new EventLog({ eventsFile: path.join(home, "no", "such", "dir", "events.ndjson") } as never);
-    await log.append("run_degraded003", "agent.progress", { message: "emitted but not persisted" });
+    // Failed appends are not broadcast, and the failed event does not consume
+    // a sequence number. Recovery still reports the persistence failure.
+    const eventsFile = path.join(home, "no", "such", "dir", "events.ndjson");
+    const log = new EventLog({ eventsFile } as never);
+    const liveEvents: AgentExecutionEvent[] = [];
+    log.subscribe((event) => liveEvents.push(event));
+    await expect(log.append("run_degraded003", "agent.progress", { message: "not durable" })).rejects.toThrow();
     expect(log.persistenceFailures).toBe(1);
+    expect(liveEvents).toHaveLength(0);
+    await mkdir(path.dirname(eventsFile), { recursive: true });
+    const durable = await log.append("run_degraded003", "agent.progress", { message: "durable" });
+    expect(durable.seq).toBe(1);
+    expect(liveEvents.map((event) => event.seq)).toEqual([1]);
 
     const rt = fakeRuntime({ runId: "run_degraded003", repoPath: repo, phase: "recon", status: "running", events: log });
     registry.registerRuntime(rt, repo);

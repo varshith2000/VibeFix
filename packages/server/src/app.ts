@@ -5,8 +5,14 @@ import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
 import {
   BacklogArtifactSchema,
+  ApproveRunRequestSchema,
+  CloneProjectRequestSchema,
+  CreateRunRequestSchema,
   FindingsArtifactSchema,
+  IdempotentCommandRequestSchema,
   KnowledgeGraphSchema,
+  OpenProjectRequestSchema,
+  parseRequestBody,
   ProductIntentSchema,
   RepoConfigSchema,
   ReportArtifactSchema,
@@ -191,8 +197,10 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   let activeClones = 0;
 
   app.post<{ Body: { url: string; token?: string } }>("/api/projects/clone", async (req, reply) => {
-    const { url, token } = req.body ?? {};
-    const parsed = parseCloneUrl(typeof url === "string" ? url.trim() : "");
+    const body = parseRequestBody(CloneProjectRequestSchema, req.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid request body", issues: body.issues });
+    const { url, token } = body.data;
+    const parsed = parseCloneUrl(url);
     if (!parsed) {
       return reply.code(400).send({ error: "provide an HTTPS GitHub URL like https://github.com/owner/repo" });
     }
@@ -414,11 +422,10 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
 
   // ---------- project ----------
   app.post<{ Body: { repoPath: string; initGit?: boolean } }>("/api/projects", async (req, reply) => {
-    const { repoPath, initGit } = req.body ?? {};
+    const body = parseRequestBody(OpenProjectRequestSchema, req.body);
+    if (!body.success) return reply.code(400).send({ error: "invalid request body", issues: body.issues });
+    const { repoPath, initGit } = body.data;
     if (!repoPath || !path.isAbsolute(repoPath)) return reply.code(400).send({ error: "absolute repoPath is required" });
-    if (initGit !== undefined && typeof initGit !== "boolean") {
-      return reply.code(400).send({ error: "initGit must be a boolean" });
-    }
     try {
       // initGit: the folder has no git trace — initialize a repository with a
       // baseline commit so worktrees (and therefore every safety mechanism)
@@ -450,7 +457,9 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     const repoPath = decodeProject((req.params as { enc: string }).enc, reply);
     if (!repoPath) return reply;
     try {
-      const config = RepoConfigSchema.parse(req.body);
+      const body = parseRequestBody(RepoConfigSchema, req.body);
+      if (!body.success) return reply.code(400).send({ error: "invalid request body", issues: body.issues });
+      const config = body.data;
       await saveRepoConfig(repoPath, config);
       // Apply live: running runs share these objects by reference.
       const manager = registry.peek(repoPath);
@@ -466,9 +475,11 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   app.post<{ Params: { enc: string }; Body: { mode?: RefactoringMode } }>(
     "/api/projects/:enc/runs",
     async (req, reply) => {
+      const body = parseRequestBody(CreateRunRequestSchema, req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: "invalid request body", issues: body.issues });
       const repoPath = decodeProject(req.params.enc, reply);
       if (!repoPath) return reply;
-      const mode = req.body?.mode === "architecture" || req.body?.mode === "modernization" ? req.body.mode : "minimal";
+      const mode = body.data.mode ?? "minimal";
       if (registry.activeRunCount() >= MAX_CONCURRENT_RUNS) {
         return reply.code(429).send({
           error: `run ceiling reached (${MAX_CONCURRENT_RUNS} active runs) — wait for or abort a running run first`,
@@ -594,6 +605,8 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   app.post<{ Params: { enc: string; runId: string }; Body: { mode?: RefactoringMode; approvedProposalIds?: string[] } }>(
     "/api/projects/:enc/runs/:runId/approve",
     async (req, reply) => {
+      const body = parseRequestBody(ApproveRunRequestSchema, req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: "invalid request body", issues: body.issues });
       const { enc, runId } = req.params;
       const scope = await resolveRun(enc, runId, reply);
       if (!scope) return reply;
@@ -611,10 +624,10 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
       const backlogArtifact = await runtime.store.latest("backlog");
       const backlog = backlogArtifact ? BacklogArtifactSchema.safeParse(backlogArtifact.data) : null;
       const approved =
-        req.body?.approvedProposalIds ??
+        body.data.approvedProposalIds ??
         (backlog?.success ? backlog.data.proposals.map((p) => p.proposalId) : []) ??
         [];
-      const mode = req.body?.mode ?? state.mode;
+      const mode = body.data.mode ?? state.mode;
 
       // Await the dispatch DIRECTLY — registry.track() is for fire-and-forget
       // background work and historically swallowed errors, which made a failed
@@ -632,6 +645,8 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   );
 
   app.post("/api/projects/:enc/runs/:runId/reject", async (req, reply) => {
+    const parsedBody = parseRequestBody(IdempotentCommandRequestSchema, req.body ?? {});
+    if (!parsedBody.success) return reply.code(400).send({ error: "invalid request body", issues: parsedBody.issues });
     const { enc, runId } = req.params as { enc: string; runId: string };
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;
@@ -652,6 +667,8 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   });
 
   app.post("/api/projects/:enc/runs/:runId/abort", async (req, reply) => {
+    const parsedBody = parseRequestBody(IdempotentCommandRequestSchema, req.body ?? {});
+    if (!parsedBody.success) return reply.code(400).send({ error: "invalid request body", issues: parsedBody.issues });
     const { enc, runId } = req.params as { enc: string; runId: string };
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;
@@ -668,6 +685,8 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   });
 
   app.post("/api/projects/:enc/runs/:runId/resume", async (req, reply) => {
+    const parsedBody = parseRequestBody(IdempotentCommandRequestSchema, req.body ?? {});
+    if (!parsedBody.success) return reply.code(400).send({ error: "invalid request body", issues: parsedBody.issues });
     const { enc, runId } = req.params as { enc: string; runId: string };
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;

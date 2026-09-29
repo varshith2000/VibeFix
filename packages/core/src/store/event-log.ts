@@ -15,22 +15,21 @@ export interface ReplayResult {
  * Append-only NDJSON event log + in-process bus. seq = line number, so a
  * reconnecting UI resyncs cheaply via GET /runs/:id/events?since=<seq>.
  *
- * Degradation is EXPLICIT: a failed append still reaches live subscribers
- * (the UI keeps working) but is counted in `persistenceFailures` and flips
- * `degraded` — the server surfaces both, because an event that never reached
- * disk cannot be reconstructed after a restart.
+ * Degradation is EXPLICIT: failed appends are counted and never published to
+ * live subscribers. A sequence is consumed only after its event is durable.
  */
 export class EventLog {
   private readonly bus = new EventEmitter();
   private seq = 0;
   private loaded = false;
   private failedAppends = 0;
+  private appendQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly paths: RunPaths) {
     this.bus.setMaxListeners(100);
   }
 
-  /** Appends that were emitted live but never reached the durable log. */
+  /** Appends that failed before reaching the durable log. */
   get persistenceFailures(): number {
     return this.failedAppends;
   }
@@ -73,27 +72,35 @@ export class EventLog {
     type: AgentExecutionEventType,
     fields: { agentId?: string; proposalId?: string; message?: string; payload?: unknown } = {},
   ): Promise<AgentExecutionEvent> {
-    await this.ensureLoaded();
-    this.seq += 1;
-    const event: AgentExecutionEvent = {
-      eventId: eventId(),
-      runId,
-      ts: new Date().toISOString(),
-      seq: this.seq,
-      type,
-      ...fields,
-    };
-    try {
-      await fs.appendFile(this.paths.eventsFile, `${JSON.stringify(event)}\n`, "utf8");
-    } catch (err) {
-      // Live subscribers still get the event, but the run is now recovery-
-      // DEGRADED: this event lives only in memory and its sequence number can
-      // be reused after a restart. Count it — the server reports it.
-      this.failedAppends += 1;
-      console.error(`[VibeFix] Failed to append event to log (${this.failedAppends} so far):`, err);
-    }
-    this.bus.emit("event", event);
-    return event;
+    let resolveEvent!: (event: AgentExecutionEvent) => void;
+    let rejectEvent!: (error: unknown) => void;
+    const result = new Promise<AgentExecutionEvent>((resolve, reject) => {
+      resolveEvent = resolve;
+      rejectEvent = reject;
+    });
+    const operation = this.appendQueue.then(async () => {
+      try {
+        await this.ensureLoaded();
+        const event: AgentExecutionEvent = {
+          eventId: eventId(),
+          runId,
+          ts: new Date().toISOString(),
+          seq: this.seq + 1,
+          type,
+          ...fields,
+        };
+        await fs.appendFile(this.paths.eventsFile, `${JSON.stringify(event)}\n`, "utf8");
+        this.seq = event.seq;
+        this.bus.emit("event", event);
+        resolveEvent(event);
+      } catch (err) {
+        this.failedAppends += 1;
+        console.error(`[VibeFix] Failed to append event to log (${this.failedAppends} so far):`, err);
+        rejectEvent(err);
+      }
+    });
+    this.appendQueue = operation.catch(() => undefined);
+    return result;
   }
 
   subscribe(listener: (event: AgentExecutionEvent) => void): () => void {

@@ -63,7 +63,26 @@ export class RefactoringEngineer implements VibeFixAgent {
           if (record.autoReject) throw new Error(`firewall auto-reject: ${decision.reason}`);
           return false;
         }
-        const abs = path.join(worktree.path, ...relativePath.split("/"));
+        let abs: string;
+        try {
+          abs = await resolveWorktreeWritePath(worktree.path, relativePath);
+        } catch (err) {
+          const reason = `E_PATH_ESCAPE: ${err instanceof Error ? err.message : String(err)}`;
+          firewall.recordViolation(relativePath, reason);
+          await ctx.store.write({
+            kind: "firewall-violation",
+            producer: ctx.def.agentId,
+            runId: ctx.runState.runId,
+            data: {
+              proposalId: proposal.proposalId,
+              attempt: ctx.attempt ?? 0,
+              path: relativePath,
+              reason,
+              ts: new Date().toISOString(),
+            },
+          });
+          throw new Error(reason);
+        }
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, newContent, "utf8");
         if (!filesTouched.includes(relativePath)) filesTouched.push(relativePath);
@@ -212,4 +231,52 @@ export class RefactoringEngineer implements VibeFixAgent {
       return failed(err);
     }
   }
+}
+
+export async function resolveWorktreeWritePath(worktreePath: string, relativePath: string): Promise<string> {
+  const normalized = relativePath.replace(/\\/g, "/");
+  if (
+    !normalized ||
+    path.posix.isAbsolute(normalized) ||
+    path.win32.isAbsolute(relativePath) ||
+    normalized.split("/").includes("..")
+  ) {
+    throw new Error(`write path '${relativePath}' is not a safe relative path`);
+  }
+
+  const root = await fs.realpath(worktreePath);
+  const candidate = path.resolve(root, ...normalized.split("/"));
+  const relative = path.relative(root, candidate);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`write path '${relativePath}' escapes the worktree`);
+  }
+
+  let ancestor = path.dirname(candidate);
+  while (true) {
+    try {
+      const realAncestor = await fs.realpath(ancestor);
+      const ancestorRelative = path.relative(root, realAncestor);
+      if (ancestorRelative === ".." || ancestorRelative.startsWith(`..${path.sep}`) || path.isAbsolute(ancestorRelative)) {
+        throw new Error(`write path '${relativePath}' traverses outside the worktree`);
+      }
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw new Error(`cannot resolve parent for '${relativePath}'`);
+      ancestor = parent;
+    }
+  }
+
+  try {
+    const realCandidate = await fs.realpath(candidate);
+    const candidateRelative = path.relative(root, realCandidate);
+    if (candidateRelative === ".." || candidateRelative.startsWith(`..${path.sep}`) || path.isAbsolute(candidateRelative)) {
+      throw new Error(`write path '${relativePath}' resolves outside the worktree`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  return candidate;
 }

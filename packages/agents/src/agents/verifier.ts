@@ -10,7 +10,7 @@ import {
 } from "@vibefix/schemas";
 import { passed, rejected, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
-import { decide } from "../runtime/decision-agent.js";
+import { decide, isAffirmativeDecision } from "../runtime/decision-agent.js";
 
 /**
  * Fresh-context Behavior Equivalence Verifier. Gates are CODE, not prompts:
@@ -83,12 +83,11 @@ export class BehaviorVerifier implements VibeFixAgent {
             : `surface drift: ${surfaceDiff.slice(0, 10).join(", ")}`,
       });
 
-      const hardFail = gates.some((g) => g.result === "FAIL");
-      let verdict: VerdictArtifact["verdict"] = hardFail ? "rejected" : "passed";
       let residual = "all deterministic gates passed";
 
-      // Residual adjudication — only when gates are green.
-      if (!hardFail && ctx.decision) {
+      // Residual adjudication is mandatory: unavailable or inconclusive
+      // decision capability must never turn a change into a pass.
+      if (!gates.some((g) => g.result === "FAIL")) {
         const diff = await git.diffHead(worktree.path);
         const answers = await decide(ctx, {
           context:
@@ -111,16 +110,29 @@ export class BehaviorVerifier implements VibeFixAgent {
           ],
         });
         const answer = answers.answers[0];
-        if (answer?.kind === "choice") {
-          if (answer.choice === "no") {
-            verdict = "rejected";
-            residual = answer.rationale ?? "residual check judged the diff behavior-changing";
-          } else {
-            residual = answer.rationale ?? "residual check confirms behavior preservation";
-          }
-        }
+        const affirmative = isAffirmativeDecision(answers.degraded, answer);
+        gates.push({
+          gate: "behavior-preservation-decision",
+          result: affirmative ? "PASS" : "FAIL",
+          details: affirmative
+            ? answer?.kind === "choice" && answer.rationale
+              ? answer.rationale
+              : "decision provider affirmed behavior preservation"
+            : answers.degraded
+              ? "decision provider unavailable; verification failed closed"
+              : answer?.kind === "choice"
+                ? answer.rationale ?? "decision provider rejected behavior preservation"
+                : answer?.kind === "noul"
+                  ? answer.reason
+                  : "decision provider returned no usable answer",
+        });
+        if (!affirmative) residual = gates[gates.length - 1]!.details;
+        else if (answer?.kind === "choice" && answer.rationale) residual = answer.rationale;
         void diff;
       }
+
+      const hardFail = gates.some((g) => g.result === "FAIL");
+      const verdict: VerdictArtifact["verdict"] = hardFail ? "rejected" : "passed";
 
       const artifactData: VerdictArtifact = {
         proposalId: proposal.proposalId,

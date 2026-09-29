@@ -3,7 +3,7 @@ import { globMatchAny } from "@vibefix/core";
 import type { GateResult, VerdictArtifact } from "@vibefix/schemas";
 import { passed, rejected, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
-import { decide } from "../runtime/decision-agent.js";
+import { decide, isAffirmativeDecision } from "../runtime/decision-agent.js";
 
 /**
  * Principle Compliance Reviewer — fresh-context devil's advocate.
@@ -47,7 +47,7 @@ export class PrincipleReviewer implements VibeFixAgent {
       let verdict: VerdictArtifact["verdict"] = gates.some((g) => g.result === "FAIL") ? "rejected" : "passed";
       let residual = "principle checks passed";
 
-      if (verdict === "passed" && ctx.decision) {
+      if (verdict === "passed") {
         const answers = await decide(ctx, {
           context:
             "You are an independent Principle Compliance Reviewer. You did NOT write this change.\n" +
@@ -69,11 +69,27 @@ export class PrincipleReviewer implements VibeFixAgent {
           ],
         });
         const answer = answers.answers[0];
-        if (answer?.kind === "choice" && answer.choice === "no") {
+        const affirmative = isAffirmativeDecision(answers.degraded, answer);
+        gates.push({
+          gate: "behavior-preservation-decision",
+          result: affirmative ? "PASS" : "FAIL",
+          details: affirmative
+            ? answer?.kind === "choice" && answer.rationale
+              ? answer.rationale
+              : "decision provider affirmed principle compliance"
+            : answers.degraded
+              ? "decision provider unavailable; review failed closed"
+              : answer?.kind === "choice"
+                ? answer.rationale ?? "decision provider rejected principle compliance"
+                : answer?.kind === "noul"
+                  ? answer.reason
+                  : "decision provider returned no usable answer",
+        });
+        if (!affirmative) {
           verdict = "rejected";
-          residual = answer.rationale ?? "principle reviewer veto";
-        } else if (answer?.kind === "choice") {
-          residual = answer.rationale ?? residual;
+          residual = gates[gates.length - 1]!.details;
+        } else if (answer?.kind === "choice" && answer.rationale) {
+          residual = answer.rationale;
         }
       }
 

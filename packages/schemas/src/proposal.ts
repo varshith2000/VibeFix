@@ -114,6 +114,7 @@ export const GateResultSchema = z.object({
     "lint",
     "build",
     "principle-compliance",
+    "behavior-preservation-decision",
   ]),
   result: z.enum(["PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"]),
   details: z.string(),
