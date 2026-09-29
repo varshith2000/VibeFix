@@ -197,6 +197,22 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
     },
     onError: (err: Error) => setError(err.message),
   });
+  // Folder has no git trace: initialize a repository (one baseline commit of
+  // the current contents) and open — worktrees need git to exist at all.
+  const [initing, setIniting] = useState(false);
+  const initGitAndOpen = async (path: string) => {
+    setIniting(true);
+    setError(null);
+    try {
+      await api.openProject(path, true);
+      saveRecent(path);
+      open.mutate(path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIniting(false);
+    }
+  };
   const clone = useMutation({
     mutationFn: () => api.cloneGitHub(ghUrl.trim(), ghToken.trim()),
     onSuccess: (res) => {
@@ -319,6 +335,15 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
           </div>
         )}
         {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
+        {error?.includes("not a git repository") && (open.variables ?? repoPath.trim()) && (
+          <button
+            onClick={() => void initGitAndOpen((open.variables ?? repoPath.trim()) as string)}
+            disabled={initing}
+            className="w-full rounded bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600 disabled:opacity-50"
+          >
+            {initing ? "Initializing git…" : "No git here — initialize a repository & open"}
+          </button>
+        )}
 
         {opened && (
           <div className="mt-4 space-y-4">

@@ -44,7 +44,10 @@ the baseline test run may write normal build/test caches. API keys go in `.env` 
 VibeFix root (gitignored).
 
 Open http://localhost:5173, point it at any git repository (clean working tree),
-pick a mode, and watch the agent graph run. Analysis runs deterministically without
+pick a mode, and watch the agent graph run. Folders with no git trace work too:
+VibeFix offers to initialize a repository (one baseline commit of the current
+contents — nothing existing is modified) so the worktree safety machinery has
+something to branch from. Analysis runs deterministically without
 keys; the engineer refuses to touch code until a real model is routed in ⚙ Settings.
 
 ### Headless

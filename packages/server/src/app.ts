@@ -29,6 +29,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { ProjectRegistry, decodePath, encodePath } from "./projects.js";
+import { bridgeReplayToLive } from "./ws-replay.js";
 import {
   RateLimiter,
   authHook,
@@ -126,32 +127,45 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     return repoPath;
   };
 
-  /** Events from a run directory on disk. */
-  const diskEvents = async (runDir: string, since: number) => {
+  /** Events from a run directory on disk — corrupt lines are COUNTED, not hidden. */
+  const diskReplay = async (runDir: string, since: number): Promise<{ events: AgentExecutionEvent[]; corruptLines: number }> => {
     let content: string;
     try {
       content = await fs.readFile(path.join(runDir, "events.ndjson"), "utf8");
     } catch {
-      return [];
+      return { events: [], corruptLines: 0 };
     }
     const events: AgentExecutionEvent[] = [];
+    let corruptLines = 0;
     for (const line of content.split("\n")) {
       if (!line.trim()) continue;
       try {
         const parsed = JSON.parse(line) as AgentExecutionEvent;
         if (parsed.seq > since) events.push(parsed);
       } catch {
-        // skip corrupt line
+        corruptLines += 1; // corrupt line — surfaced as replayDegraded, never silent
       }
     }
-    return events;
+    return { events, corruptLines };
   };
 
-  const diskState = async (runDir: string): Promise<unknown | null> => {
+  /**
+   * Disk state with missing/corrupt distinguished: a run dir whose state.json
+   * cannot be read is DEGRADED (500 + flag), not silently "unknown run".
+   */
+  const diskState = async (
+    runDir: string,
+  ): Promise<{ ok: true; state: unknown } | { ok: false; reason: string } | null> => {
+    let raw: string;
     try {
-      return JSON.parse(await fs.readFile(path.join(runDir, "state.json"), "utf8"));
+      raw = await fs.readFile(path.join(runDir, "state.json"), "utf8");
     } catch {
-      return null;
+      return { ok: false, reason: "state.json is missing or unreadable" };
+    }
+    try {
+      return { ok: true, state: JSON.parse(raw) };
+    } catch {
+      return { ok: false, reason: "state.json is corrupt (unparseable JSON)" };
     }
   };
 
@@ -165,6 +179,7 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
       timestamp: new Date().toISOString(),
       version: "0.1.0",
       activeRuntimes: registry.activeRuntimeCount(),
+      backgroundFailures: registry.backgroundFailureCount(),
     };
   });
 
@@ -398,11 +413,17 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   });
 
   // ---------- project ----------
-  app.post<{ Body: { repoPath: string } }>("/api/projects", async (req, reply) => {
-    const { repoPath } = req.body ?? {};
+  app.post<{ Body: { repoPath: string; initGit?: boolean } }>("/api/projects", async (req, reply) => {
+    const { repoPath, initGit } = req.body ?? {};
     if (!repoPath || !path.isAbsolute(repoPath)) return reply.code(400).send({ error: "absolute repoPath is required" });
+    if (initGit !== undefined && typeof initGit !== "boolean") {
+      return reply.code(400).send({ error: "initGit must be a boolean" });
+    }
     try {
-      const manager = await registry.open(repoPath);
+      // initGit: the folder has no git trace — initialize a repository with a
+      // baseline commit so worktrees (and therefore every safety mechanism)
+      // work. Explicit opt-in from the UI; never a silent side effect.
+      const manager = await registry.open(repoPath, { initIfMissing: initGit === true });
       const runs = await manager.listRuns();
       return {
         repoPath: manager.repoPath,
@@ -505,8 +526,12 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;
     if (scope.runtime) return scope.runtime.snapshot();
-    const state = scope.runDir ? await diskState(scope.runDir) : null;
-    if (state) return state;
+    const result = scope.runDir ? await diskState(scope.runDir) : null;
+    if (result?.ok) return result.state;
+    if (result && !result.ok) {
+      // The run EXISTS but its state cannot be reconstructed — degraded, not gone.
+      return reply.code(500).send({ error: `run state degraded: ${result.reason}`, degraded: true });
+    }
     return reply.code(404).send({ error: "unknown run" });
   });
 
@@ -526,10 +551,45 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     const since = Number((req.query as { since?: string }).since ?? 0);
     const sinceSeq = Number.isFinite(since) ? since : 0;
     // Live runtime streams from memory; otherwise the durable on-disk log
-    // serves the same events (server restart / browsing an old run).
-    if (!scope.runtime) return { events: await diskEvents(scope.runDir!, sinceSeq) };
-    return { events: await scope.runtime.events.eventsSince(sinceSeq) };
+    // serves the same events (server restart / browsing an old run). Both
+    // paths report degradation explicitly: corrupt lines or events that were
+    // emitted live but never persisted can never be reconstructed silently.
+    if (!scope.runtime) {
+      const { events, corruptLines } = await diskReplay(scope.runDir!, sinceSeq);
+      return { events, corruptLineCount: corruptLines, replayDegraded: corruptLines > 0 };
+    }
+    const log = scope.runtime.events;
+    const { events, corruptLines } = await log.replaySince(sinceSeq);
+    return {
+      events,
+      corruptLineCount: corruptLines,
+      // Live-only events lost to a persistence failure (sequence may be reused
+      // after restart) — flagged so clients know the log is incomplete.
+      replayDegraded: corruptLines > 0 || log.degraded,
+      persistenceFailures: log.persistenceFailures,
+    };
   });
+
+  // ---------- idempotency (approve / reject / abort / resume) ----------
+  // Mutating run commands accept an Idempotency-Key header (or body field).
+  // A retried request with a seen key replays the ORIGINAL successful
+  // response instead of double-executing or surfacing a confusing conflict.
+  const idempotencyCache = new Map<string, { status: number; body: unknown }>();
+  const idemKeyOf = (runId: string, req: import("fastify").FastifyRequest): string | null => {
+    const header = req.headers["idempotency-key"];
+    if (typeof header === "string" && header.trim().length > 0) return `${runId}:${header.trim()}`;
+    const bodyKey = (req.body as { idempotencyKey?: unknown } | undefined)?.idempotencyKey;
+    if (typeof bodyKey === "string" && bodyKey.trim().length > 0) return `${runId}:${bodyKey.trim()}`;
+    return null;
+  };
+  const rememberIdempotent = (key: string | null, status: number, body: unknown): void => {
+    if (!key) return;
+    if (idempotencyCache.size >= 500) {
+      const oldest = idempotencyCache.keys().next().value;
+      if (oldest !== undefined) idempotencyCache.delete(oldest);
+    }
+    idempotencyCache.set(key, { status, body });
+  };
 
   app.post<{ Params: { enc: string; runId: string }; Body: { mode?: RefactoringMode; approvedProposalIds?: string[] } }>(
     "/api/projects/:enc/runs/:runId/approve",
@@ -539,6 +599,11 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
       if (!scope) return reply;
       if (!scope.runtime) return reply.code(409).send({ error: "run is not live in this server — open it first" });
       const runtime = scope.runtime;
+      const idemKey = idemKeyOf(runId, req);
+      const cached = idemKey ? idempotencyCache.get(idemKey) : undefined;
+      if (cached) {
+        return reply.code(cached.status).header("x-idempotent-replay", "true").send(cached.body);
+      }
       const state = runtime.snapshot();
       if (state.phase !== "awaitingApproval") {
         return reply.code(409).send({ error: `run is in phase '${state.phase}', not awaitingApproval` });
@@ -551,9 +616,14 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
         [];
       const mode = req.body?.mode ?? state.mode;
 
+      // Await the dispatch DIRECTLY — registry.track() is for fire-and-forget
+      // background work and historically swallowed errors, which made a failed
+      // approval look like {ok:true} while the run was actually broken.
       try {
-        await registry.track(runId, runtime.dispatch({ type: "CHECKPOINT_APPROVED", mode, approvedProposalIds: approved }));
-        return { ok: true, approved, mode };
+        await runtime.dispatch({ type: "CHECKPOINT_APPROVED", mode, approvedProposalIds: approved });
+        const body = { ok: true, approved, mode };
+        rememberIdempotent(idemKey, 200, body);
+        return body;
       } catch (err) {
         console.error(`[VibeFix] Checkpoint approval failed for run ${runId}:`, err);
         return reply.code(500).send({ error: String(err instanceof Error ? err.message : err) });
@@ -566,12 +636,19 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;
     if (!scope.runtime) return reply.code(409).send({ error: "run is not live in this server — open it first" });
+    const idemKey = idemKeyOf(runId, req);
+    const cached = idemKey ? idempotencyCache.get(idemKey) : undefined;
+    if (cached) {
+      return reply.code(cached.status).header("x-idempotent-replay", "true").send(cached.body);
+    }
     const state = scope.runtime.snapshot();
     if (state.phase !== "awaitingApproval") {
       return reply.code(409).send({ error: `run is in phase '${state.phase}', not awaitingApproval` });
     }
-    registry.track(runId, scope.runtime.dispatch({ type: "CHECKPOINT_REJECTED" }));
-    return { ok: true };
+    await registry.track(runId, scope.runtime.dispatch({ type: "CHECKPOINT_REJECTED" }));
+    const body = { ok: true };
+    rememberIdempotent(idemKey, 200, body);
+    return body;
   });
 
   app.post("/api/projects/:enc/runs/:runId/abort", async (req, reply) => {
@@ -579,8 +656,15 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;
     if (!scope.runtime) return reply.code(409).send({ error: "run is not live in this server — open it first" });
-    registry.track(runId, scope.runtime.dispatch({ type: "ABORT" }));
-    return { ok: true };
+    const idemKey = idemKeyOf(runId, req);
+    const cached = idemKey ? idempotencyCache.get(idemKey) : undefined;
+    if (cached) {
+      return reply.code(cached.status).header("x-idempotent-replay", "true").send(cached.body);
+    }
+    await registry.track(runId, scope.runtime.dispatch({ type: "ABORT" }));
+    const body = { ok: true };
+    rememberIdempotent(idemKey, 200, body);
+    return body;
   });
 
   app.post("/api/projects/:enc/runs/:runId/resume", async (req, reply) => {
@@ -588,8 +672,15 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
     const scope = await resolveRun(enc, runId, reply);
     if (!scope) return reply;
     if (!scope.runtime) return reply.code(409).send({ error: "run is not live in this server — open it first" });
-    registry.track(runId, scope.runtime.resume());
-    return { ok: true };
+    const idemKey = idemKeyOf(runId, req);
+    const cached = idemKey ? idempotencyCache.get(idemKey) : undefined;
+    if (cached) {
+      return reply.code(cached.status).header("x-idempotent-replay", "true").send(cached.body);
+    }
+    await registry.track(runId, scope.runtime.resume());
+    const body = { ok: true };
+    rememberIdempotent(idemKey, 200, body);
+    return body;
   });
 
   app.get("/api/projects/:enc/runs/:runId/findings", async (req, reply) => {
@@ -741,26 +832,41 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
       // open. The UI's REST polling keeps it fresh — closing here used to put
       // the UI into an endless close/reconnect "connecting" loop.
       const runDir = runPaths(repoPath, runId).runDir;
-      void Promise.all([diskState(runDir), diskEvents(runDir, since)]).then(([state, events]) => {
-        if (state) send({ t: "snapshot", state });
-        for (const event of events) send({ t: "event", event, seq: event.seq });
+      void Promise.all([diskState(runDir), diskReplay(runDir, since)]).then(([state, replay]) => {
+        if (state?.ok) send({ t: "snapshot", state: state.state });
+        else if (state && !state.ok) send({ t: "degraded", reason: `run state degraded: ${state.reason}` });
+        for (const event of replay.events) send({ t: "event", event, seq: event.seq });
+        if (replay.corruptLines > 0) {
+          send({ t: "degraded", reason: `${replay.corruptLines} corrupt event line(s) were skipped`, corruptLineCount: replay.corruptLines });
+        }
         send({ t: "readonly", runId });
       });
       return;
     }
     const runtime = entry.runtime;
-    // Snapshot + replay, then live.
+    // Snapshot first, then replay→live through the bridge. The bridge
+    // subscribes BEFORE querying history, so an event appended between the
+    // replay query and the subscription is buffered and flushed — the old
+    // replay-then-subscribe order could lose it forever.
     send({ t: "snapshot", state: runtime.snapshot() });
-    void runtime.events.eventsSince(since).then((events) => {
-      for (const event of events) send({ t: "event", event, seq: event.seq });
-    });
-    const unsubscribe = runtime.events.subscribe((event: AgentExecutionEvent) => {
-      send({ t: "event", event, seq: event.seq });
-      // Snapshot on state-changing events so the UI can never go stale.
-      if (SNAPSHOT_EVENTS.has(event.type)) {
-        send({ t: "snapshot", state: runtime.snapshot() });
-        send({ t: "usage", usage: runtime.usage });
-      }
+    if (runtime.events.degraded) {
+      send({
+        t: "degraded",
+        reason: `${runtime.events.persistenceFailures} event(s) were emitted but never persisted — replay after restart may be incomplete`,
+        persistenceFailures: runtime.events.persistenceFailures,
+      });
+    }
+    const unsubscribe = bridgeReplayToLive({
+      source: runtime.events,
+      since,
+      send,
+      onLiveEvent: (event: AgentExecutionEvent) => {
+        // Snapshot on state-changing events so the UI can never go stale.
+        if (SNAPSHOT_EVENTS.has(event.type)) {
+          send({ t: "snapshot", state: runtime.snapshot() });
+          send({ t: "usage", usage: runtime.usage });
+        }
+      },
     });
     socket.on("close", () => unsubscribe());
   });

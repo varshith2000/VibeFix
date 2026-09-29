@@ -21,11 +21,13 @@ const runUrl = (repoPath: string, runId: string, suffix = "") =>
 export const api = {
   agents: () => fetch("/api/agents").then(json<AgentDefinition[]>),
 
-  openProject: (repoPath: string) =>
+  /** initGit: initialize a git repository (with a baseline commit) when the
+   *  folder has no git trace — VibeFix needs git for its worktree safety. */
+  openProject: (repoPath: string, initGit?: boolean) =>
     fetch("/api/projects", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repoPath }),
+      body: JSON.stringify({ repoPath, initGit: initGit || undefined }),
     }).then(
       json<{
         repoPath: string;

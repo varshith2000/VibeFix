@@ -64,6 +64,9 @@ export interface Finding {
   confidence: number;
   category: string;
   recommendedChangeCategory: string;
+  /** Provenance: "ts-ast", "regex-heuristic", "import-graph", "llm-validated", ... */
+  analyzer?: string;
+  parserStatus?: string;
   risk: { value: number; band: "low" | "medium" | "high" | "forbidden"; rationale?: string };
   proposedChangeId: string | null;
 }

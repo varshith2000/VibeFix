@@ -1,8 +1,9 @@
 import {
   NodeFsFacts,
   NodeTestRunner,
-  RegexImportGraph,
+  createImportGraph,
   computeMetrics,
+  type ImportGraph,
   type FileMetrics,
   type RepoSnapshot,
 } from "@vibefix/adapters";
@@ -59,7 +60,9 @@ export function buildAgents(): Map<string, VibeFixAgent> {
 /** Facts shared across agents within one run — computed once. */
 interface RunFacts {
   snapshot: RepoSnapshot;
-  importEdges: Awaited<ReturnType<RegexImportGraph["edges"]>>;
+  importEdges: Awaited<ReturnType<ImportGraph["edges"]>>;
+  /** Which analyzer produced the graph ("ts-module-resolution" | "regex-heuristic"). */
+  importGraphAnalyzer: string;
   metrics: FileMetrics;
 }
 const factsCache = new Map<string, Promise<RunFacts>>();
@@ -70,10 +73,10 @@ async function factsFor(repoPath: string): Promise<RunFacts> {
     cached = (async () => {
       const fs = new NodeFsFacts();
       const snapshot = await fs.snapshot(repoPath);
-      const graph = new RegexImportGraph(repoPath, snapshot.files);
+      const graph = createImportGraph(repoPath, snapshot.files);
       const importEdges = await graph.edges();
       const metrics = await computeMetrics(repoPath, snapshot.files);
-      return { snapshot, importEdges, metrics };
+      return { snapshot, importEdges, importGraphAnalyzer: graph.analyzer, metrics };
     })();
     factsCache.set(repoPath, cached);
   }
@@ -142,6 +145,7 @@ export class VibefixExecutor implements AgentExecutorPort {
         runner: new NodeTestRunner(),
         snapshot: facts.snapshot,
         importEdges: facts.importEdges,
+        importGraphAnalyzer: facts.importGraphAnalyzer,
         metrics: facts.metrics,
       },
       llm: this.safeText(definition),

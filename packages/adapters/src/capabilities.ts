@@ -67,8 +67,13 @@ export interface ImportEdge {
   resolved: boolean;
 }
 
-/** Static import graph. Regex-based in MVP; tree-sitter/sidecar upgrade seam. */
+/**
+ * Static import graph. Backed by the TypeScript module resolver for TS/JS
+ * (see TsImportGraph) with regex heuristics for other languages; `analyzer`
+ * says which, so findings can carry the provenance.
+ */
 export interface ImportGraph {
+  readonly analyzer: string;
   edges(): Promise<ImportEdge[]>;
   importersOf(path: string): Promise<string[]>;
 }

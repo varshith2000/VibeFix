@@ -67,6 +67,30 @@ export class GitTool {
     return res.code === 0 && res.stdout.trim() === "true";
   }
 
+  /**
+   * Initialize git in a folder that has no repository, with a baseline commit
+   * of the current contents (worktrees need at least one commit to branch
+   * from). Local-only config is set so the commit succeeds even on machines
+   * with no global git identity. Nothing existing is modified — a fresh .git
+   * plus one commit is the entire footprint.
+   */
+  async initBaseline(): Promise<void> {
+    let res = await this.git(["init", "-b", "main"]);
+    if (res.code !== 0) {
+      // Older git without -b: plain init, then rename whatever branch appeared.
+      res = await this.git(["init"]);
+      if (res.code !== 0) throw new Error(`git init failed: ${res.stderr.slice(0, 200)}`);
+      await this.git(["branch", "-M", "main"]).catch(() => undefined);
+    }
+    await this.git(["config", "user.name", "VibeFix"]);
+    await this.git(["config", "user.email", "vibefix@local"]);
+    await this.git(["config", "core.longpaths", "true"]);
+    const add = await this.git(["add", "-A"]);
+    if (add.code !== 0) throw new Error(`git add failed: ${add.stderr.slice(0, 200)}`);
+    const commit = await this.git(["commit", "-m", "vibefix: baseline snapshot before first run", "--allow-empty"]);
+    if (commit.code !== 0) throw new Error(`git commit failed: ${commit.stderr.slice(0, 200)}`);
+  }
+
   async isClean(): Promise<boolean> {
     const res = await this.git(["status", "--porcelain"]);
     return res.code === 0 && res.stdout.trim().length === 0;

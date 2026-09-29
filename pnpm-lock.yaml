@@ -23,6 +23,9 @@ importers:
       '@vibefix/schemas':
         specifier: workspace:*
         version: link:../schemas
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
 
   packages/agents:
     dependencies:

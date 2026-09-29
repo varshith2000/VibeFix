@@ -91,6 +91,18 @@ export function FindingsPanel({ repoPath, runId }: { repoPath: string; runId: st
                 <span>{f.findingId}</span>
                 <span className="rounded bg-ink-950 px-1 text-slate-400">{f.category}</span>
                 <span>conf {(f.confidence * 100).toFixed(0)}%</span>
+                {f.analyzer && (
+                  <span
+                    className={`rounded px-1 ${
+                      f.analyzer.startsWith("llm") || f.analyzer === "regex-heuristic"
+                        ? "bg-amber-950/70 text-amber-400"
+                        : "bg-sky-950/70 text-sky-400"
+                    }`}
+                    title={f.parserStatus ?? "how this finding was produced"}
+                  >
+                    {f.analyzer}
+                  </span>
+                )}
                 {f.proposedChangeId && <span className="text-violet-400">→ {f.proposedChangeId}</span>}
               </div>
             </summary>

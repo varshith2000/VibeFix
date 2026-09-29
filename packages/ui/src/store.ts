@@ -13,13 +13,20 @@ interface RunStore {
   ws: WebSocket | null;
   wsStatus: WsStatus;
   lastEventAt: number | null;
+  /** Server-reported recovery degradation (corrupt replay / unpersisted events). */
+  replayDegraded: string | null;
   connect(runId: string, repoPath: string): void;
   disconnect(): void;
   /** REST resync (initial load, WS drop, or polling fallback). Idempotent by eventId. */
   syncEvents(): Promise<void>;
+  /** Full resync after a detected sequence gap: missed events + fresh snapshot. */
+  resyncAfterGap(): Promise<void>;
   applySnapshot(state: RunState): void;
   applyUsage(usage: RunStore["usage"]): void;
   pushEvent(event: RunEvent): void;
+  // Reconnect lifecycle internals (not rendered):
+  connectionGeneration: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const EMPTY_USAGE = { total: 0, byAgent: {}, byProvider: {} };
@@ -33,10 +40,27 @@ export const useRunStore = create<RunStore>((set, get) => ({
   ws: null,
   wsStatus: "offline",
   lastEventAt: null,
+  replayDegraded: null,
+  connectionGeneration: 0,
+  reconnectTimer: null,
 
   connect(runId: string, repoPath: string) {
     get().disconnect();
-    set({ usage: EMPTY_USAGE, events: [], lastEventAt: null, wsStatus: "connecting", runId, repoPath });
+    // Every connection gets a generation; stale timers/sockets from a
+    // previous run (or a previous connect for the same run) check it before
+    // acting — without this, switching runs left an orphaned timer able to
+    // reconnect a socket for the WRONG run.
+    const generation = get().connectionGeneration + 1;
+    set({
+      usage: EMPTY_USAGE,
+      events: [],
+      lastEventAt: null,
+      replayDegraded: null,
+      wsStatus: "connecting",
+      runId,
+      repoPath,
+      connectionGeneration: generation,
+    });
     void get().syncEvents(); // durable REST log works even if WS never connects
 
     let reconnectAttempts = 0;
@@ -44,58 +68,72 @@ export const useRunStore = create<RunStore>((set, get) => ({
     const baseReconnectDelay = 1_000;
     const maxReconnectDelay = 30_000;
 
+    const isCurrent = () => get().connectionGeneration === generation && get().runId === runId;
+
     const attemptConnection = () => {
+      if (!isCurrent()) return;
       const protocol = location.protocol === "https:" ? "wss" : "ws";
       // Project-scoped: the server refuses a runId that does not belong to
       // the named project (enc), and the token reaches it via the Vite proxy.
       const ws = new WebSocket(
         `${protocol}://${location.host}/ws?runId=${encodeURIComponent(runId)}&enc=${encodeURIComponent(encPath(repoPath))}`,
       );
-      
+
       ws.onopen = () => {
+        if (!isCurrent()) {
+          ws.close();
+          return;
+        }
         reconnectAttempts = 0;
         set({ wsStatus: "live" });
         void get().syncEvents(); // catch anything missed before the socket opened
       };
-      
+
       ws.onmessage = (msg) => {
+        if (!isCurrent()) return;
         try {
           const frame = JSON.parse(msg.data as string) as
             | { t: "snapshot"; state: RunState }
             | { t: "usage"; usage: RunStore["usage"] }
             | { t: "event"; event: RunEvent; seq: number }
-            | { t: "readonly"; runId: string };
+            | { t: "readonly"; runId: string }
+            | { t: "degraded"; reason: string; corruptLineCount?: number; persistenceFailures?: number };
           if (frame.t === "snapshot") get().applySnapshot(frame.state);
           else if (frame.t === "usage") get().applyUsage(frame.usage);
           else if (frame.t === "event") get().pushEvent(frame.event);
           else if (frame.t === "readonly") set({ wsStatus: "offline" }); // replay-only socket; REST polling feeds updates
+          else if (frame.t === "degraded") set({ replayDegraded: frame.reason });
         } catch {
           // ignore malformed frame
         }
       };
-      
+
       ws.onclose = () => {
-        if (get().runId !== runId) return;
+        if (!isCurrent()) return;
         set({ wsStatus: "offline" });
-        
-        // Exponential backoff reconnection logic
+
+        // Exponential backoff reconnection. The timer is RETAINED so
+        // disconnect() can cancel it — an uncancelled timer could fire after
+        // the user switched runs and attempt a stale connection.
         if (reconnectAttempts < maxReconnectAttempts) {
           reconnectAttempts++;
           const delay = Math.min(baseReconnectDelay * Math.pow(2, reconnectAttempts - 1), maxReconnectDelay);
-          setTimeout(() => {
-            if (get().runId === runId) attemptConnection();
+          const timer = setTimeout(() => {
+            if (isCurrent()) attemptConnection();
           }, delay);
+          set({ reconnectTimer: timer });
         } else {
           // After max attempts, rely solely on REST polling
           console.warn(`[VibeFix] WebSocket reconnection failed after ${maxReconnectAttempts} attempts, using REST polling`);
         }
       };
-      
+
       ws.onerror = () => {
+        if (!isCurrent()) return;
         console.warn(`[VibeFix] WebSocket error, attempting reconnection (attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})`);
       };
-      
-      set({ runId, ws });
+
+      set({ ws });
     };
 
     attemptConnection();
@@ -121,9 +159,24 @@ export const useRunStore = create<RunStore>((set, get) => ({
     }
   },
 
+  async resyncAfterGap() {
+    const { runId, repoPath } = get();
+    if (!runId || !repoPath) return;
+    await get().syncEvents();
+    try {
+      const state = await api.run(repoPath, runId);
+      if (get().runId === runId) get().applySnapshot(state);
+    } catch (err) {
+      console.warn(`[VibeFix] Gap resync failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  },
+
   disconnect() {
-    const { ws } = get();
-    set({ runId: null, repoPath: null, wsStatus: "offline" });
+    const { ws, reconnectTimer } = get();
+    // Bump the generation: any pending reconnect timer for the OLD connection
+    // is now stale and will no-op even if it already fired.
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    set({ runId: null, repoPath: null, wsStatus: "offline", connectionGeneration: get().connectionGeneration + 1, reconnectTimer: null });
     if (ws) {
       ws.onclose = null;
       ws.close();
@@ -139,6 +192,17 @@ export const useRunStore = create<RunStore>((set, get) => ({
   },
 
   pushEvent(event) {
+    // Sequence-gap detection: seq is a dense counter (line number in the
+    // event log). If an incoming event jumps past the expected next seq,
+    // events were LOST in transit (not merely deduped) — pull them from the
+    // durable REST log instead of trusting the stream.
+    const prior = get().events;
+    const lastSeq = prior.length > 0 ? (prior[prior.length - 1]?.seq ?? 0) : 0;
+    if (lastSeq > 0 && event.seq > lastSeq + 1) {
+      console.warn(`[VibeFix] Event sequence gap detected (${lastSeq} -> ${event.seq}); resyncing from REST log`);
+      void get().resyncAfterGap();
+    }
+
     set((s) => {
       // WS and REST can both deliver the same event — dedupe by eventId.
       if (s.events.some((e) => e.eventId === event.eventId)) return {};

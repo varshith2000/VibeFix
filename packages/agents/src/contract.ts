@@ -14,6 +14,8 @@ export interface AgentToolset {
   runner: TestRunner;
   snapshot: RepoSnapshot;
   importEdges: ImportEdge[];
+  /** Which analyzer built the graph ("ts-module-resolution" | "regex-heuristic"). */
+  importGraphAnalyzer: string;
   metrics: FileMetrics;
 }
 

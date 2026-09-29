@@ -1,7 +1,7 @@
 import type { FindingsArtifact } from "@vibefix/schemas";
 import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
-import { makeFinding } from "../shared/findings.js";
+import { makeFinding, findingFingerprint, validateLlmFindingAgainstRepo } from "../shared/findings.js";
 import { enrich } from "../runtime/text-agent-loop.js";
 import { z } from "zod";
 
@@ -60,6 +60,8 @@ export class ArchitectureAuditor implements VibeFixAgent {
             impact: "Circular modules cannot be loaded, tested or reasoned about in isolation; changes propagate unpredictably.",
             category: "architecture",
             recommendedChangeCategory: "introduce-boundary",
+            analyzer: "import-graph",
+            parserStatus: ctx.tools.importGraphAnalyzer,
           }),
         );
       }
@@ -81,6 +83,8 @@ export class ArchitectureAuditor implements VibeFixAgent {
             impact: "This module is a change amplifier — one modification ripples into every importer.",
             category: "architecture",
             recommendedChangeCategory: "extract-module",
+            analyzer: "import-graph",
+            parserStatus: ctx.tools.importGraphAnalyzer,
           }),
         );
       }
@@ -94,6 +98,8 @@ export class ArchitectureAuditor implements VibeFixAgent {
             impact: "A module reaching everywhere depends on everything — it cannot be moved or isolated safely.",
             category: "architecture",
             recommendedChangeCategory: "introduce-boundary",
+            analyzer: "import-graph",
+            parserStatus: ctx.tools.importGraphAnalyzer,
           }),
         );
       }
@@ -115,6 +121,8 @@ export class ArchitectureAuditor implements VibeFixAgent {
               impact: "Presentation code owning data access violates separation of concerns; persistence changes break the UI.",
               category: "architecture",
               recommendedChangeCategory: "extract-service",
+              analyzer: "import-graph",
+              parserStatus: ctx.tools.importGraphAnalyzer,
             }),
           );
         }
@@ -168,9 +176,31 @@ export class ArchitectureAuditor implements VibeFixAgent {
         maxTokens: 2_048,
       });
       if (discovered) {
-        const knownTitles = new Set(findings.map((f) => f.title.toLowerCase()));
+        // Dedupe by CONTENT FINGERPRINT (category + normalized location +
+        // evidence + recommendation), not title — different wording about the
+        // same defect merges, differently-located defects never do.
+        const seen = new Set(findings.map((f) => findingFingerprint(f)));
+        const knownFiles = ctx.tools.snapshot.files.map((f) => f.path);
+        let rejected = 0;
+        let unverified = 0;
         for (const d of discovered.findings.slice(0, 10)) {
-          if (knownTitles.has(d.title.toLowerCase())) continue;
+          // Validate against repository facts BEFORE accepting: a hallucinated
+          // location must never become a finding the Engineer then "fixes".
+          const verdict = validateLlmFindingAgainstRepo(d, knownFiles);
+          if (!verdict.accepted) {
+            rejected++;
+            continue;
+          }
+          const candidate = {
+            category: "architecture" as const,
+            location: d.location,
+            evidence: d.evidence,
+            recommendedChangeCategory: d.recommendedChangeCategory,
+          };
+          const fingerprint = findingFingerprint(candidate);
+          if (seen.has(fingerprint)) continue;
+          seen.add(fingerprint);
+          if (verdict.analyzer === "llm-unverified") unverified++;
           findings.push(
             makeFinding({
               title: d.title,
@@ -179,11 +209,18 @@ export class ArchitectureAuditor implements VibeFixAgent {
               impact: d.impact,
               category: "architecture",
               recommendedChangeCategory: d.recommendedChangeCategory,
-              confidence: d.confidence,
+              // Findings whose evidence could not be cross-checked against the
+              // snapshot are demoted so downstream weighing can trust them less.
+              confidence: verdict.analyzer === "llm-unverified" ? Math.min(d.confidence, 0.5) : d.confidence,
+              analyzer: verdict.analyzer,
+              parserStatus: "validated against repository file snapshot",
             }),
           );
         }
-        await ctx.progress(`architect model added ${findings.length} total architecture findings`);
+        await ctx.progress(
+          `architect model: ${findings.length} total architecture findings` +
+            (rejected > 0 || unverified > 0 ? ` (${rejected} rejected as hallucinated, ${unverified} unverified)` : ""),
+        );
       }
 
       const artifact = await ctx.store.write({

@@ -51,6 +51,7 @@ export function EventStream({
   const events = useRunStore((s) => s.events);
   const wsStatus = useRunStore((s) => s.wsStatus);
   const lastEventAt = useRunStore((s) => s.lastEventAt);
+  const replayDegraded = useRunStore((s) => s.replayDegraded);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -150,6 +151,14 @@ export function EventStream({
             />
             {wsStatus === "live" ? "live" : wsStatus === "connecting" ? "connecting…" : "polling"}
           </span>
+          {replayDegraded && (
+            <span
+              className="rounded bg-orange-900/50 px-1.5 py-0.5 text-[9px] normal-case text-orange-300"
+              title={replayDegraded}
+            >
+              ⚠ replay degraded
+            </span>
+          )}
           <button
             onClick={toggleExpanded}
             className="rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-slate-200"

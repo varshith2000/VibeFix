@@ -87,6 +87,16 @@ export const FindingSchema = z.object({
   confidence: z.number().min(0).max(1),
   category: FindingCategorySchema,
   recommendedChangeCategory: RecommendedChangeCategorySchema,
+  /**
+   * Analyzer provenance — WHERE the finding came from, so consumers can weigh
+   * it: "ts-ast" (TypeScript compiler AST), "regex-heuristic" (low-confidence
+   * fallback), "import-graph", "llm-validated" (model output checked against
+   * repository facts), "llm-unverified" (model output that could not be
+   * cross-checked). Older artifacts without these fields parse unchanged.
+   */
+  analyzer: z.string().optional(),
+  /** Parser/probe status, e.g. "typescript-5 AST" or "regex fallback". */
+  parserStatus: z.string().optional(),
   /** Assigned by the Risk Assessor; initial diagnosis agents leave a placeholder. */
   risk: RiskScoreSchema,
   /** Set by Synthesis when this finding is folded into a proposal. */

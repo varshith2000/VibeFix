@@ -46,21 +46,32 @@ export class RunManager {
   static async open(
     repoPath: string,
     executorFactory: ExecutorFactory,
-    options?: { config?: RepoConfig; onBudgetWarn?: (runId: string) => void },
+    options?: { config?: RepoConfig; onBudgetWarn?: (runId: string) => void; initIfMissing?: boolean },
   ): Promise<RunManager> {
     const absolute = path.resolve(repoPath);
     debug("run-manager", `Opening project at ${absolute}`);
-    
+
     const stat = await fs.stat(absolute).catch(() => null);
     if (!stat?.isDirectory()) {
       error("run-manager", `Path ${repoPath} is not a directory`);
       throw new Error(`'${repoPath}' is not a directory`);
     }
-    
+
     const git = new GitTool(absolute);
     if (!(await git.isRepo())) {
-      error("run-manager", `Path ${repoPath} is not a git repository`);
-      throw new Error(`'${repoPath}' is not a git repository (VibeFix needs git for worktrees)`);
+      // A project without git trace can still be analyzed: initialize a
+      // repository with a baseline commit of the current contents (worktrees
+      // need a commit to branch from). Opt-in — never surprise the user.
+      if (options?.initIfMissing) {
+        info("run-manager", `No git repository at ${absolute} — initializing one with a baseline commit`);
+        await git.initBaseline();
+      } else {
+        error("run-manager", `Path ${repoPath} is not a git repository`);
+        throw new Error(
+          `'${repoPath}' is not a git repository (VibeFix needs git for worktrees). ` +
+            `Re-open with initGit to initialize one automatically.`,
+        );
+      }
     }
     
     const config = options?.config ?? (await loadRepoConfig(absolute));

@@ -30,7 +30,7 @@ export class SmellDetector implements VibeFixAgent {
             evidence: [
               `function spans ${fn.lines} lines`,
               `max nesting depth ${fn.maxDepth}`,
-              `detected by deterministic metric scan`,
+              `measured by ${fn.analyzer === "ts-ast" ? "TypeScript compiler AST" : "regex heuristic (low confidence)"}`,
             ],
             impact:
               fn.maxDepth >= 5
@@ -38,6 +38,11 @@ export class SmellDetector implements VibeFixAgent {
                 : "Long functions concentrate multiple responsibilities and are hard to test in isolation.",
             category: "smell",
             recommendedChangeCategory: "extract-function",
+            // AST measurements are exact; regex measurements are known to
+            // mismeasure braces in strings/comments — trust them less.
+            confidence: fn.analyzer === "ts-ast" ? 0.9 : 0.5,
+            analyzer: fn.analyzer,
+            parserStatus: fn.analyzer === "ts-ast" ? "typescript compiler AST" : "regex fallback",
           }),
         );
       }
@@ -51,6 +56,8 @@ export class SmellDetector implements VibeFixAgent {
             impact: "Copy-pasted logic drifts apart over time; a fix applied to one copy silently misses the others.",
             category: "smell",
             recommendedChangeCategory: "deduplicate",
+            analyzer: "duplication-scan",
+            parserStatus: "normalized line-window hashing (exact text match)",
           }),
         );
       }
@@ -64,6 +71,7 @@ export class SmellDetector implements VibeFixAgent {
             impact: "A file this large almost certainly mixes concerns; every change risks unrelated breakage.",
             category: "architecture",
             recommendedChangeCategory: "extract-module",
+            analyzer: "line-count",
           }),
         );
       }
