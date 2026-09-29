@@ -134,28 +134,36 @@ open" button whenever the open fails with "not a git repository". Verified by
 
 ---
 
-## Phase 5 — Align documentation with reality ⬜ (pending)
+## Phase 5 — Align documentation with reality ✅ (done 2026-09-29)
 
-**Scope from the risks doc:**
-- Rewrite `AGENTS.md` into implemented / partially implemented / not yet
-  verified; never mark a feature complete without a test covering the
-  failure scenario.
-- Reconcile `docs/production-contract.md`, `docs/production-contract-audit.md`
-  and `docs/production-acceptance-criteria.md` with the post-Phase-2/3 state
-  (several entries and line-number references describe pre-phase code: the
-  now-scoped `/api/runs/*` routes, the removed `findRunDir`, SEC-011 which
-  Phase 2 fixed, REL-03/04 degradation reporting which Phase 3 implemented).
-- Document local-only security assumptions and operational limitations.
-- Do not use "production-ready" anywhere until CI and the security tests are
-  green from a clean checkout — they are, so the remaining blocker for that
-  word is the open contract items, not the CI.
+**Scope from the risks doc:** rewrite AGENTS.md into implemented / partially
+implemented / not yet verified; reconcile the contract documents with the
+post-phase state; document local-only security assumptions and operational
+limitations; never say "production-ready" without green proof.
+
+**What was done:**
+
+| Document | Change |
+|---|---|
+| `AGENTS.md` | Fully rewritten. Three tiers — **Implemented** (a table where every row names its proving test; change the test in the same commit as the behavior), **Partially implemented** (13 named gaps with contract IDs), **Not yet verified** (design claims without tests). Plus explicit local-only security assumptions and standing operational limitations. All "production-grade / load-ready" language removed |
+| `docs/production-contract.md` | Revised to **v3.1** incorporating the repair program under its own normative rules: 9 items newly enforced with proving tests (SEC-02/03/05/07/08/11, REL-06/10/11), new tested limits RES-07b/07c, statuses updated per item (Current sections rewritten, stale pre-repair line citations dropped), trusted-environment paragraph revised (auth exists; the boundary is now "same-user local process"), GATE table re-scored (01/02/04/05 green-or-green-locally; 06/08/11/12 partial), summary re-counted: 21 enforced, 9 contradicted remain, GATE-14 still not green |
+| `docs/production-contract-audit.md` | Kept verbatim as the pre-repair evidence record, with a prominent point-in-time header pointing to contract v3.1 and the proving-test files |
+| `docs/production-contract-review.md` | Same treatment — adversarial record preserved, header notes which findings the program addressed |
+| `docs/production-acceptance-criteria.md` | Same treatment — criteria remain the testable definitions; the status snapshot is marked pre-repair, current statuses deferred to contract v3.1 (re-scoring every row is open GATE-13/14 work, stated as such) |
+| `README.md` | Status line and security model were already updated in Phases 2–4; reviewed for consistency — no overstatement remains |
+
+**Deliberately not done:** re-scoring all ~100 acceptance-criteria rows
+against the post-repair tree, and assigning Owners (GATE-13). Both are named
+as open work inside the documents rather than silently claimed.
 
 ---
 
 ## Bottom line
 
-Phases 1–4 are implemented and verified (97 tests green, `pnpm verify`
-green, E2E through the new analyzers). The system is still **not
-production-ready**: Phase 5 (documentation truth) remains, and the
-enforceable gate list in `docs/production-contract.md` §10 still has open
-blockers beyond this repair program.
+All five phases of the repair program are complete (97 tests green,
+`pnpm verify` green). The documentation now separates what is proven from
+what is partial from what is unverified, and no document claims
+production-readiness. What remains between VibeFix and "production-ready"
+is exclusively the open contract work tracked in
+`docs/production-contract.md` v3.1 §10 (GATE-03/06/07/08/09/10/11/12/13/14) —
+not this repair program.

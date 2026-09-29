@@ -2,10 +2,11 @@
 
 **A local-first, multi-agent refactoring control plane for vibe-coded repositories.**
 
-> **Status (2026-09-28):** early development — **not production-ready**. The API now
+> **Status (2026-09-29):** early development — **not production-ready**. The API
 > requires a bearer token and binds loopback-only by default (see "Security model"
-> below), but runtime-correctness gaps remain. See `docs/production-contract.md` for
-> the enforceable contract and its current state.
+> below), but known reliability and safety gaps remain. The repair program
+> (Phases 1–5) is complete — see `docs/PHASES.md`; the enforceable contract and
+> its current state live in `docs/production-contract.md` (v3.1).
 
 VibeFix does not "one-shot fix" your code. It runs a deterministic pipeline of narrow,
 single-responsibility agents whose prime directive is **behavior preservation**:

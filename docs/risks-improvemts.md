@@ -1,3 +1,9 @@
+> **Status (2026-09-29):** this is the original risk assessment that defined
+> the five-phase repair program. **All five phases are now implemented** —
+> see `docs/PHASES.md` for what was done per phase (with proving tests) and
+> `docs/production-contract.md` v3.1 for current guarantee statuses. Read
+> this document as the historical problem statement, not the current state.
+
 Executive assessment
 Table
 

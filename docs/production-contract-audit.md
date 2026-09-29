@@ -5,6 +5,19 @@
 **Audited against:** `README.md`, `AGENTS.md`, `docs/v1doc.md`, `ISSUES_FIXED.md`, `docs/production-contract.md`, and the project context stated for this audit
 **Method:** Every claim below was verified against source. The highest-severity findings were independently re-verified by reading the cited code directly; file paths and line numbers refer to the current working tree. No behavior is inferred where no code exists.
 
+> **⚠ Point-in-time document (2026-09-27).** This audit predates the repair
+> program (Phases 1–4, see `docs/PHASES.md`). Its findings drove that program;
+> the statuses below are the *pre-repair* evidence, kept verbatim as the
+> record of what was wrong. For current statuses consult
+> `docs/production-contract.md` **v3.1**, whose summary table and per-item
+> Current/Target sections incorporate the repair outcomes with their proving
+> tests (`packages/server/test/security.test.ts`,
+> `packages/server/test/runtime-correctness.test.ts`,
+> `packages/adapters/test/analysis.test.ts`,
+> `packages/agents/test/finding-validation.test.ts`,
+> `packages/server/test/open-project.test.ts`). Line-number citations in this
+> audit refer to the pre-repair tree and are stale by design.
+
 **Status legend used throughout:**
 
 | Status | Meaning |

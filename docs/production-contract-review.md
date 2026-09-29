@@ -4,6 +4,14 @@
 **Documents reviewed:** `docs/production-contract-audit.md`, `docs/production-contract.md`, `docs/production-acceptance-criteria.md`, `README.md`, `AGENTS.md`
 **Code evidence base:** working tree at commit `16682ef`; all cited behavior was verified in the audit and, for load-bearing claims, re-verified by direct source reading. Test suite state: 4 files / 31 tests, all passing — none of the defects below is covered by a failing test.
 
+> **⚠ Point-in-time document (2026-09-27).** This review predates the repair
+> program (Phases 1–4, see `docs/PHASES.md`) and is preserved unchanged as
+> the adversarial record the program responded to. Several findings are now
+> addressed (e.g. F-15 replay race, F-16 unauthenticated API, F-17 remote
+> bind, F-24 idempotency, F-26 retention-driven runtime leak); the normative
+> wording it forced into the contract stands, and current statuses live in
+> `docs/production-contract.md` v3.1.
+
 Each finding gives: (1) location, (2) problem, (3) why the wording is insufficient, (4) concrete failure scenario, (5) stronger wording, (6) required implementation control, (7) required automated test, (8) blocks release.
 
 ---

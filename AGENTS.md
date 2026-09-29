@@ -1,275 +1,130 @@
-# VibeFix Production-Grade Improvements
+# VibeFix — Agent & Engineering Guide
 
-> **Status (2026-09-27):** this document is a historical changelog of hardening work,
-> not a readiness claim. The application is **not production-ready**; the enforceable
-> contract and its verified state live in `docs/production-contract.md` (see also the
-> audit and hostile review under `docs/`). Items below marked with known limitations
-> were found incomplete by the audit.
+> **How to read this document (repair-program rule, Phase 5):** a feature is
+> listed as **Implemented** only when a passing test in this repository
+> covers it (or its failure scenario). **Partially implemented** means the
+> code exists but a named gap remains. **Not yet verified** means exactly
+> that — do not rely on it. The enforceable contract and its gate list live
+> in `docs/production-contract.md` (v3.1); the repair-program status file is
+> `docs/PHASES.md`. **The application is not production-ready** — that word
+> is reserved for GATE-14 in the contract §10.
 
-## Overview
-This document outlines the production-grade improvements made to the VibeFix codebase to address critical issues with WebSocket connectivity, execution flow, state synchronization, and overall system reliability.
+## What VibeFix is
 
-## Critical Issues Fixed
+A local-first, multi-agent refactoring control plane for vibe-coded
+repositories: a deterministic pipeline of narrow agents whose prime directive
+is behavior preservation (Understand → Preserve → Improve → Verify →
+Explain). Changes land only through firewalled git worktrees after a
+structurally blinded verification pool and an explicit human checkpoint.
 
-### 1. WebSocket Connection Instability ✅
-**Problem**: WebSocket connections were unstable, showing "connecting" status and data flickering.
-**Solution**: 
-- Implemented exponential backoff reconnection logic (1s to 30s max delay)
-- Added maximum reconnection attempts (10) to prevent infinite loops
-- Added proper error handling and logging for WebSocket failures
-- Graceful fallback to REST polling when WebSocket fails
-- Added unique process ID to temp file names to prevent Windows file conflicts
+**Local-only security assumption (explicit):** one operator, one trusted
+machine. The API requires a bearer token and binds loopback by default, but
+VibeFix is **not** designed against a malicious local user or process — a
+local process that can read `~/.vibefix/server-token` can drive the API.
+Remote exposure additionally requires `VIBEFIX_ALLOW_REMOTE=1` plus an
+explicit `VIBEFIX_API_TOKEN` (see the contract, SEC-02). Multi-user, hosted,
+and multi-tenant deployment are out of scope.
 
-**Files Modified**:
-- `packages/ui/src/store.ts` - Enhanced WebSocket connection logic
+## Implemented (test-proven)
 
-### 2. Execution Flow Getting Stuck After Checkpoint Approval ✅
-**Problem**: The system would get stuck after approving changes in the checkpoint phase.
-**Solution**:
-- Added try-catch blocks around checkpoint approval dispatch
-- Improved error handling in the approval endpoint
-- Enhanced logging for debugging approval flow issues
-- Fixed dispatch queue error recovery to prevent deadlocks
+Each row names its proving test. If you change one of these behaviors,
+change or extend that test in the same commit.
 
-**Files Modified**:
-- `packages/server/src/app.ts` - Enhanced approval endpoint error handling
-- `packages/core/src/orchestrator/runtime.ts` - Improved dispatch queue error recovery
+| Capability | Where | Proving test |
+|---|---|---|
+| Verifiable build/test baseline | root `verify` script (install --frozen-lockfile → typecheck → test → build, incl. UI) | locally green (`pnpm verify`); CI workflow `.github/workflows/ci.yml` (Ubuntu + Windows matrix) runs it on every push/PR — the Windows leg is locally verified, the Ubuntu leg first proves itself on the first pushed commit |
+| Deterministic reducer state machine (guards, retries, defers, checkpoint gating) | `packages/core/src/orchestrator/reducer.ts` | `packages/core/test/reducer.test.ts` |
+| Change Firewall (scope deny-by-default, protected paths, lockfiles, auto-reject) | `packages/core/src/worktree/firewall.ts` | `packages/core/test/firewall.test.ts` |
+| Artifact schema versioning + migration walk rejection | `packages/schemas/src/migrations.ts` | `packages/schemas/test/roundtrip.test.ts` |
+| Full pipeline end-to-end over a fixture repo (real git worktrees, landing, cleanup-on-rejection) | executor + orchestrator | `packages/core/test/e2e.test.ts` |
+| Bearer-token auth on every endpoint except `/api/health`; timing-safe compare | `packages/server/src/security.ts` | `packages/server/test/security.test.ts` (auth block) |
+| Binding guard: non-loopback host refuses to start without `VIBEFIX_ALLOW_REMOTE=1` AND an explicit ≥16-char token | `security.ts` `assertBindingAllowed` | `security.test.ts` (binding guard block) |
+| CORS allowlist + foreign-`Origin` refusal (DNS-rebinding/CSRF) | `security.ts` `originCheckHook` | `security.test.ts` (origin block) |
+| Path containment by `path.relative` (no string-prefix collision) + symlink realpath re-check | `security.ts` `isPathInside`; `/file` route | `security.test.ts` (filesystem containment block) |
+| Project-scoped run URLs; cross-project run access is 404; runId shape validation | `app.ts` `resolveRun` | `security.test.ts` (project-scoped runs block) |
+| Secure git clone credentials: token via 0600 credential-store file (never argv, never `.git/config`), atomic target reservation, stderr scrubbing | `app.ts` clone route; `security.ts` | `security.test.ts` (clone block) + live smoke (zero residue) |
+| Rate limits (600 req/min, 10 clones/min) and ceilings (≤2 concurrent clones, ≤4 active runs, 1 MiB bodies) | `security.ts` `RateLimiter`; `app.ts` | `security.test.ts` (rate limiting + run ceiling) |
+| Approval failures return HTTP 500 (never `ok:true` over a broken dispatch) | `app.ts` approve route | `packages/server/test/runtime-correctness.test.ts` |
+| Background dispatch failures force-fail the run (FATAL) and are counted in `/api/health` | `projects.ts` `track()` | `runtime-correctness.test.ts` |
+| Terminal runtimes are unregistered after background settle (disk keeps serving) | `projects.ts` `watchForTerminal` | `runtime-correctness.test.ts` |
+| WS replay→live handoff without loss or duplication (subscribe-first bridge) | `packages/server/src/ws-replay.ts` | `runtime-correctness.test.ts` (bridge block) |
+| Idempotency keys on approve/reject/abort/resume (replay original 200) | `app.ts` | `runtime-correctness.test.ts` |
+| Explicit recovery degradation: corrupt event lines counted, corrupt `state.json` → 500 `{degraded}`, unpersisted events flagged | `event-log.ts`; `app.ts` | `runtime-correctness.test.ts` (degradation block) |
+| TS-AST code metrics with analyzer labels (`ts-ast` / `regex-heuristic`) | `adapters/src/tools/code-metrics.ts` | `packages/adapters/test/analysis.test.ts` |
+| Import graph via TypeScript module resolution (tsconfig paths, dynamic imports, export-from); regex fallback labeled | `adapters/src/tools/import-graph.ts` | `analysis.test.ts` |
+| LLM findings validated against the file snapshot (hallucinated locations rejected; unverifiable evidence demoted) | `agents/src/shared/findings.ts` | `packages/agents/test/finding-validation.test.ts` |
+| Content fingerprints for finding dedupe (not title matching) | `agents/src/shared/findings.ts` | `finding-validation.test.ts` |
+| Opt-in git initialization for git-less projects (baseline commit, local identity, nothing existing modified) | `adapters` `GitTool.initBaseline`; `run-manager.ts` | `packages/server/test/open-project.test.ts` |
 
-### 3. State Synchronization Issues ✅
-**Problem**: REST polling and WebSocket updates were conflicting, causing inconsistent state.
-**Solution**:
-- Implemented sequence-based event synchronization
-- Added proper deduplication of events from both sources
-- Enhanced error handling in sync operations
-- Added incremental event loading based on last sequence number
-- Improved state application logic with better error recovery
+## Partially implemented (known gaps — do not rely on the missing part)
 
-**Files Modified**:
-- `packages/ui/src/store.ts` - Enhanced state synchronization logic
-- `packages/ui/src/App.tsx` - Improved polling error handling
+- **WebSocket authentication** — the token reaches `/ws` via query param and
+  the auth hook; the in-handler re-check exists, but no test drives a real
+  socket upgrade (contract SEC-04).
+- **Secret redaction** — clone credentials never reach argv/`.git/config`
+  and stderr is scrubbed, but the central logger has no redaction pass
+  (contract SEC-10/DAT-03) and file contents sent to providers are not
+  redacted (DAT-02).
+- **Event durability** — an append that fails disk write still reaches live
+  subscribers; it is now *counted and surfaced* (`persistenceFailures`,
+  `replayDegraded`) instead of silent, but the seq can still be reused after
+  restart (contract REL-03/04 target: persist-before-publish).
+- **Interrupted-run detection** — a crash mid-run still reloads as
+  `running` (contract REL-08); `/open` auto-resumes it, which is recovery by
+  optimism, not by proof.
+- **Idempotency cache is in-memory** — replay works within one server
+  process lifetime only; cross-restart duplicates rely on the phase guard's
+  409 (contract REL-01 target: atomic, persisted keys).
+- **Single writer per run** — no run lock; server and CLI can open the same
+  run concurrently (contract REL-14).
+- **Execution policy for repo commands** — repo test/build commands still
+  execute on the host by default; no approval policy (contract SEC-12).
+- **Verification fail-closed** — with no decision provider routed, the
+  fallback can still auto-pass a gate (contract SAFE-10; the contract's
+  fail-closed target is not implemented).
+- **Engineer write containment** — `path.join` without resolved-path
+  containment in the engineer's write closure (contract SAFE-02).
+- **Cumulative firewall violations** — the violation counter resets per
+  attempt (contract SAFE-16).
+- **Graceful shutdown** — no signal handling; Ctrl-C can interrupt a
+  cherry-pick on the user's branch (contract REL-13/SAFE-15).
+- **Resource limits** — several TBD values remain (contract §5); what exists
+  (clone/run ceilings, timeouts, body limit) is tested, the rest is
+  unbounded.
+- **Folder browser breadth** — `/api/fs/browse` can list any directory on
+  the machine. It is authenticated and is the project picker's core feature;
+  constrained browse roots remain a contract target (SEC-06).
 
-### 4. Error Handling and Recovery Mechanisms ✅
-**Problem**: Insufficient error handling led to system failures without proper recovery.
-**Solution**:
-- Added comprehensive error handling throughout the orchestrator
-- Implemented graceful degradation for non-critical failures
-- Added proper logging at all critical points
-- Implemented retry logic for transient failures
-- Added structured error messages for debugging
+## Not yet verified (claims from design, no covering test)
 
-**Files Modified**:
-- `packages/core/src/orchestrator/runtime.ts` - Enhanced error handling
-- `packages/core/src/store/event-log.ts` - Added error recovery for event persistence
-- `packages/core/src/store/evidence-store.ts` - Enhanced error handling for artifact operations
+- Restart-recovery correctness beyond the happy path (kill-mid-run,
+  kill-mid-landing — contract GATE-07).
+- Behavior preservation on real repositories with real models (all E2E tests
+  run scripted test doubles; real-provider smoke is manual:
+  `scripts/smoke-real-providers.mjs`).
+- Windows child-process tree termination (`.cmd` shims may orphan
+  grandchildren — contract REL-12).
+- Cost estimation, metrics, readiness probes, diagnostics bundles
+  (contract OBS-03/05/07, RES-13 — planned, not built).
 
-### 5. Event Stream Persistence and Replay Logic ✅
-**Problem**: Event persistence failures could lead to data loss and inconsistent state.
-**Solution**:
-- Enhanced event log with better error handling
-- Added fallback to emit events even if persistence fails *(known limitation: the emitted event is memory-only, its sequence number can be reused after restart, and the failure is not surfaced as degraded — contract REL-03/REL-04)*
-- Improved atomic write operations with better retry logic
-- Added Windows-specific file operation improvements
-- Enhanced corrupt line handling in event replay
+## Operational limitations (standing)
 
-**Files Modified**:
-- `packages/core/src/store/event-log.ts` - Enhanced event persistence
-- `packages/core/src/store/evidence-store.ts` - Improved atomic write operations
+- Node ≥ 20, git on PATH; pnpm 9 workspace.
+- All run state under `~/.vibefix` (`VIBEFIX_HOME`); target repos are read
+  pre-approval except two documented exceptions (contract SAFE-001:
+  `core.longpaths` git-config write, shared `node_modules` junction).
+- LLM keys from the environment only; analysis runs keyless, code
+  modification requires a routed real model (mocks are test-only).
+- No retention/sweep: runs, worktrees and clones accumulate until deleted
+  manually (contract DAT-05).
 
-### 6. Comprehensive Logging and Debugging ✅
-**Problem**: Lack of structured logging made debugging difficult.
-**Solution**:
-- Created centralized logging utility with multiple log levels
-- Added structured logging throughout the system
-- Implemented context-aware logging for better debugging
-- Added log retention and query capabilities
-- Integrated logging into all critical system components
+## Debugging aids
 
-**Files Modified**:
-- `packages/core/src/util/logger.ts` - New centralized logging system
-- `packages/core/src/orchestrator/runtime.ts` - Integrated logging
-- `packages/core/src/orchestrator/run-manager.ts` - Integrated logging
-- `packages/core/src/worktree/worktree-manager.ts` - Integrated logging
-
-### 7. Race Conditions in Dispatch Queue ✅
-**Problem**: Concurrent dispatch operations on Windows caused file I/O collisions and deadlocks.
-**Solution**:
-- Enhanced dispatch queue with better error recovery
-- Added unique event IDs for tracking
-- Improved serialization of critical operations
-- Added exponential backoff for file operations
-- Enhanced atomic write operations with process-specific temp files
-
-**Files Modified**:
-- `packages/core/src/orchestrator/runtime.ts` - Enhanced dispatch queue
-- `packages/core/src/store/evidence-store.ts` - Improved atomic write operations
-
-### 8. Worktree Cleanup and Resource Management ✅
-**Problem**: Worktrees were not properly cleaned up, leading to resource leaks.
-**Solution**:
-- Enhanced worktree cleanup with better error handling
-- Added detailed logging for cleanup operations
-- Implemented graceful degradation for failed cleanups
-- Added comprehensive error reporting for cleanup failures
-- Improved node_modules linking with better error handling
-
-**Files Modified**:
-- `packages/core/src/worktree/worktree-manager.ts` - Enhanced cleanup logic
-
-### 9. Health Checks and Monitoring ✅
-**Problem**: No way to monitor system health or active runtime status.
-**Solution**:
-- Added health check endpoint for monitoring
-- Implemented active runtime count tracking
-- Added system status information
-- Enhanced project registry with runtime statistics
-
-**Files Modified**:
-- `packages/server/src/app.ts` - Added health check endpoint
-- `packages/server/src/projects.ts` - Added runtime count tracking
-
-### 10. Session Recovery After Server Restarts ✅
-**Problem**: Sessions were not properly recovered after server restarts, leading to lost work.
-**Solution**:
-- Enhanced run loading with stale state healing
-- Improved interrupted run detection and resumption
-- Added comprehensive logging for recovery operations
-- Enhanced state validation during load operations
-- Improved error handling for corrupted state files
-
-**Files Modified**:
-- `packages/server/src/app.ts` - Enhanced run opening logic
-- `packages/core/src/orchestrator/run-manager.ts` - Improved run loading and state healing
-
-**Known limitation (2026-09-27 audit):** the stale-state healing in `run-manager.ts`
-only fires when the run status is *not* `running`. A crash mid-run therefore reloads
-as falsely `running`, and healed agent states are never written back to disk. Crashed
-runs are not reliably classified as interrupted until contract REL-08 is implemented.
-
-## Architecture Improvements
-
-### Centralized Logging System
-- Structured logging with levels (DEBUG, INFO, WARN, ERROR)
-- Context-aware logging for better debugging
-- Log retention and query capabilities
-- Console output with appropriate formatting
-- Exported utility functions for easy integration
-
-### Enhanced Error Recovery
-- Graceful degradation for non-critical failures
-- Retry logic for transient failures
-- Comprehensive error messages
-- Proper error propagation and handling
-- System recovery after failures
-
-### Improved Resource Management
-- Better worktree cleanup with error handling
-- Enhanced file operation safety
-- Process-specific temporary files
-- Resource leak prevention
-- Graceful cleanup on failures
-
-### Enhanced Monitoring
-- Health check endpoint
-- Active runtime tracking
-- System status monitoring
-- Error rate tracking
-- Performance metrics foundation
-
-## Development Improvements
-
-### Build Configuration
-- Enhanced TypeScript configuration
-- Improved build process
-- Better error reporting
-- Enhanced development workflow
-
-### Testing Foundation
-- Structured logging for test debugging
-- Better error isolation
-- Improved test reliability
-- Enhanced test coverage potential
-
-## Production Readiness
-
-### Reliability
-- ✅ Improved error handling throughout
-- ✅ Enhanced recovery mechanisms
-- ✅ Better resource management
-- ✅ Comprehensive logging
-
-### Scalability
-- ✅ Health monitoring capabilities
-- ✅ Resource tracking
-- ✅ Performance monitoring foundation
-- ✅ Load-ready architecture
-
-### Maintainability
-- ✅ Structured logging
-- ✅ Comprehensive error messages
-- ✅ Better code organization
-- ✅ Enhanced documentation
-
-### Monitoring
-- ✅ Health check endpoints
-- ✅ Runtime tracking
-- ✅ Error logging
-- ✅ Performance metrics foundation
-
-## Usage Guidelines
-
-### Enabling Debug Logging
-```typescript
-import { logger, LogLevel } from '@vibefix/core';
-
-// Set minimum log level to DEBUG for detailed logging
-logger.setMinLevel(LogLevel.DEBUG);
-```
-
-### Health Check
 ```bash
-curl http://localhost:8630/api/health
+pnpm verify                         # full chain CI runs
+curl http://127.0.0.1:8630/api/health   # liveness + activeRuntimes + backgroundFailures
 ```
 
-### Monitoring Active Runtimes
-The health check endpoint returns the number of active runtimes for monitoring purposes.
-
-## Future Enhancements
-
-### Recommended Next Steps
-1. Add metrics collection and reporting
-2. Implement distributed tracing
-3. Add performance profiling
-4. Enhance alerting capabilities
-5. Implement automated testing for recovery scenarios
-6. Add configuration validation
-7. Implement rate limiting
-8. Add request/response logging
-9. Enhance security monitoring
-10. Implement backup and recovery procedures
-
-### Monitoring Integration
-- Integrate with monitoring systems (Prometheus, Grafana)
-- Add alerting for critical failures
-- Implement log aggregation (ELK, Splunk)
-- Add distributed tracing (Jaeger, Zipkin)
-
-### Performance Optimization
-- Add caching layers
-- Implement connection pooling
-- Optimize database operations
-- Add request batching
-- Implement lazy loading
-
-## Conclusion
-
-These improvements moved VibeFix from a prototype toward a hardened application with:
-- Error handling and recovery in several critical paths
-- Centralized logging (without secret redaction — see contract SEC-10)
-- Resource-management improvements (worktree cleanup, atomic evidence writes — the event log is not atomic)
-- Improved maintainability
-
-**The system is not production-ready.** As of 2026-09-27 the contract records 15
-contradicted guarantees and 22 open blocker-severity acceptance criteria (no API
-authentication, GitHub-token persistence in clone `.git/config`, verification that can
-auto-pass without a decision provider, no resource ceilings, and others). Release
-conditions are defined exclusively by the gates in `docs/production-contract.md` §10.
+API token: `VIBEFIX_API_TOKEN` env or `~/.vibefix/server-token` (delete to
+rotate; the Vite dev proxy injects it automatically). See README "Security
+model" and `.env.example` for every knob.

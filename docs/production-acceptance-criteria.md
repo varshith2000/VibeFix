@@ -4,6 +4,20 @@
 **Source:** `docs/production-contract.md` v3.0 — every guarantee in that contract is converted here into a testable acceptance criterion.
 **Evidence base:** `docs/production-contract-audit.md`; test suite executed 2026-09-27 (`pnpm test`: **4 files, 31 tests, all passing** — `reducer.test.ts` 16, `firewall.test.ts` 10, `e2e.test.ts` 2, `roundtrip.test.ts` 3).
 
+> **⚠ Status snapshot is pre-repair (2026-09-27).** The criteria themselves
+> remain the testable definitions; the *status* column reflects the tree
+> before the repair program (Phases 1–4, `docs/PHASES.md`). Since then the
+> suite has grown to **9 files / 97 tests**, and many security/reliability
+> criteria are now covered by
+> `packages/server/test/security.test.ts`,
+> `packages/server/test/runtime-correctness.test.ts`,
+> `packages/server/test/open-project.test.ts`,
+> `packages/adapters/test/analysis.test.ts`, and
+> `packages/agents/test/finding-validation.test.ts`. Authoritative current
+> statuses: `docs/production-contract.md` v3.1 §summary. Re-scoring every
+> row of this table against the post-repair tree is open GATE-13/GATE-14
+> work.
+
 **Status semantics (important):**
 
 | Status | Meaning |
