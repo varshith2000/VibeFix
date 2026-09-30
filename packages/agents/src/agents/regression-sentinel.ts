@@ -16,6 +16,7 @@ export class RegressionSentinel implements VibeFixAgent {
       return rejected("regression-sentinel requires a proposal and worktree");
     }
     const { proposal, worktree } = ctx;
+    if (!worktree.baseCommit) return rejected("verification requires a recorded worktree base commit");
     try {
       await ctx.progress("running regression checks");
       const gates: GateResult[] = [];
@@ -87,7 +88,7 @@ export class RegressionSentinel implements VibeFixAgent {
         const { GitTool } = await import("@vibefix/adapters");
         const { globMatchAny } = await import("@vibefix/core");
         const git = new GitTool(worktree.path);
-        const changed = await git.changedFiles(worktree.path);
+        const changed = await git.changedFilesBetween(worktree.baseCommit, "HEAD", worktree.path);
         const hits = changed.filter((f) => globMatchAny(forbidden, f.replace(/\\/g, "/")));
         gates.push({
           gate: "firewall-scope",

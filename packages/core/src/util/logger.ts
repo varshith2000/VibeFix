@@ -1,3 +1,5 @@
+import { redactSecrets, redactUnknown } from "@vibefix/schemas";
+
 /**
  * Centralized logging utility for VibeFix
  * Provides structured logging with levels and context
@@ -44,8 +46,8 @@ export class Logger {
       level,
       timestamp: new Date().toISOString(),
       context,
-      message,
-      data,
+      message: redactSecrets(message),
+      data: redactUnknown(data),
     };
 
     this.logs.push(entry);
@@ -57,19 +59,21 @@ export class Logger {
     const levelName = LogLevel[level];
     const timestamp = new Date().toISOString();
     const prefix = `[${timestamp}] [${levelName}] [${context}]`;
+    const safeMessage = redactSecrets(message);
+    const safeData = redactUnknown(data);
 
     switch (level) {
       case LogLevel.DEBUG:
-        console.debug(prefix, message, data ?? '');
+        console.debug(prefix, safeMessage, safeData ?? '');
         break;
       case LogLevel.INFO:
-        console.info(prefix, message, data ?? '');
+        console.info(prefix, safeMessage, safeData ?? '');
         break;
       case LogLevel.WARN:
-        console.warn(prefix, message, data ?? '');
+        console.warn(prefix, safeMessage, safeData ?? '');
         break;
       case LogLevel.ERROR:
-        console.error(prefix, message, data ?? '');
+        console.error(prefix, safeMessage, safeData ?? '');
         break;
     }
   }

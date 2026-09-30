@@ -28,13 +28,14 @@ export class BehaviorVerifier implements VibeFixAgent {
       return rejected("verifier requires a proposal and worktree");
     }
     const { proposal, worktree } = ctx;
+    if (!worktree.baseCommit) return rejected("verification requires a recorded worktree base commit");
     try {
       await ctx.progress("running deterministic gates");
       const gates: GateResult[] = [];
 
       // (a) firewall-scope
       const git = new GitTool(worktree.path);
-      const changed = await git.changedFiles(worktree.path);
+      const changed = await git.changedFilesBetween(worktree.baseCommit, "HEAD", worktree.path);
       const outOfScope = changed.filter((f) => !globMatchAny(proposal.filesInScope, f.replace(/\\/g, "/")));
       gates.push({
         gate: "firewall-scope",
@@ -59,16 +60,21 @@ export class BehaviorVerifier implements VibeFixAgent {
           result: "NOT_APPLICABLE",
           details: "no runnable suite at baseline; relying on surface + residual checks",
         });
-      } else {
-        const run = await ctx.tools.runner.runCommand(worktree.path, baselineRun.command ?? "npm test", 300_000);
-        const baselineOk = baselineRun.ok === true;
+      } else if (baselineRun.ok !== true) {
         gates.push({
           gate: "regression-suite",
-          result: run.ok === baselineOk ? "PASS" : "FAIL",
+          result: "FAIL",
+          details: "baseline suite was not green; behavior preservation cannot be established",
+        });
+      } else {
+        const run = await ctx.tools.runner.runCommand(worktree.path, baselineRun.command ?? "npm test", 300_000);
+        gates.push({
+          gate: "regression-suite",
+          result: run.ok ? "PASS" : "FAIL",
           details:
-            run.ok === baselineOk
-              ? `suite outcome unchanged (ok=${run.ok})`
-              : `suite flipped: baseline ok=${baselineOk}, worktree ok=${run.ok}\n${run.outputTail.slice(-1_500)}`,
+            run.ok
+              ? "previously-green suite remains green"
+              : `previously-green suite failed in the worktree\n${run.outputTail.slice(-1_500)}`,
         });
       }
 
@@ -88,7 +94,7 @@ export class BehaviorVerifier implements VibeFixAgent {
       // Residual adjudication is mandatory: unavailable or inconclusive
       // decision capability must never turn a change into a pass.
       if (!gates.some((g) => g.result === "FAIL")) {
-        const diff = await git.diffHead(worktree.path);
+        const diff = await git.diffBetween(worktree.baseCommit, "HEAD", worktree.path);
         const answers = await decide(ctx, {
           context:
             "You are the final behavior-preservation check. You see ONLY the diff, the proposal and the gates — " +
@@ -170,40 +176,36 @@ export class BehaviorVerifier implements VibeFixAgent {
       /export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g,
       /export\s+(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/g,
       /export\s+(?:type|interface|enum)\s+([A-Za-z_$][\w$]*)/g,
+      /export\s+default\s+([A-Za-z_$][\w$]*)/g,
+      /exports\.([A-Za-z_$][\w$]*)\s*=/g,
+      /^def\s+([A-Za-z_][\w]*)\s*\(/gm,
+      /^class\s+([A-Za-z_][\w]*)/gm,
     ];
     const baselineSet = new Set(baseline.publicApiSurface);
     const drift: string[] = [];
     for (const file of changed) {
+      const baselineForFile = new Set(
+        [...baselineSet].filter((symbol) => symbol.startsWith(`${file.replace(/\\/g, "/")}::`)),
+      );
       let content: string;
       try {
         content = await fs.readFile(path.join(worktreePath, ...file.split("/")), "utf8");
       } catch {
-        continue; // deleted file: surface removal detected by baseline diff below
+        for (const symbol of baselineForFile) drift.push(`-${symbol}`);
+        continue;
       }
+      const currentForFile = new Set<string>();
       for (const pattern of EXPORT_PATTERNS) {
         pattern.lastIndex = 0;
         let m: RegExpExecArray | null;
         while ((m = pattern.exec(content)) !== null) {
           const symbol = `${file.replace(/\\/g, "/")}::${m[1]}`;
-          if (!baselineSet.has(symbol)) drift.push(`+${symbol}`);
+          currentForFile.add(symbol);
         }
       }
-    }
-    // Removed symbols: any baseline symbol in a changed file that vanished.
-    const changedSet = new Set(changed.map((c) => c.replace(/\\/g, "/")));
-    for (const symbol of baselineSet) {
-      const file = symbol.split("::")[0] ?? "";
-      if (changedSet.has(file)) {
-        let content: string;
-        try {
-          content = await fs.readFile(path.join(worktreePath, ...file.split("/")), "utf8");
-        } catch {
-          drift.push(`-${symbol}`);
-          continue;
-        }
-        const name = symbol.split("::")[1] ?? "";
-        if (!content.includes(name)) drift.push(`-${symbol}`);
-      }
+      if (/module\.exports\s*=/.test(content)) currentForFile.add(`${file.replace(/\\/g, "/")}::module.exports`);
+      for (const symbol of currentForFile) if (!baselineForFile.has(symbol)) drift.push(`+${symbol}`);
+      for (const symbol of baselineForFile) if (!currentForFile.has(symbol)) drift.push(`-${symbol}`);
     }
     void ctx;
     return [...new Set(drift)];

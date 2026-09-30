@@ -28,6 +28,7 @@ export * from "./proposal.js";
 export * from "./routing.js";
 export * from "./config.js";
 export * from "./api.js";
+export * from "./redaction.js";
 export * from "./survey.js";
 export * from "./report.js";
 export * from "./intent.js";

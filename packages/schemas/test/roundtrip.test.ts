@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeArtifact, encodeArtifact, makeArtifact } from "../src/index.js";
+import { decodeArtifact, encodeArtifact, makeArtifact, RepoConfigSchema, DEFAULT_MODEL_ROUTING } from "../src/index.js";
 import type { BacklogArtifact } from "../src/index.js";
 
 const backlog: BacklogArtifact = {
@@ -26,6 +26,11 @@ const backlog: BacklogArtifact = {
 };
 
 describe("artifact codec", () => {
+  it("defaults repository command execution to denied", () => {
+    const config = RepoConfigSchema.parse({ routing: DEFAULT_MODEL_ROUTING });
+    expect(config.executionPolicy.allowRepositoryCommands).toBe(false);
+  });
+
   it("round-trips a valid backlog artifact", () => {
     const artifact = makeArtifact({
       artifactId: "art_test1",

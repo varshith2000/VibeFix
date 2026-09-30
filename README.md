@@ -107,6 +107,11 @@ the clone (never in the `git clone` argv, never in the clone's `.git/config`):
 
 Per-project routing: `~/.vibefix/projects/<key>/config.json` or ⚙ Settings in the UI.
 
+Repository test/build commands are denied by default because they execute code from
+the target repository on the host. Enable **Repository command execution** explicitly
+in Settings only for repositories you trust; when it is disabled, verification fails
+closed and no change is allowed to land.
+
 ---
 
 ## Security model
@@ -182,4 +187,3 @@ pnpm verify   # install --frozen-lockfile && typecheck && test && build
 the root `tsc -b` project graph because it is a non-composite Vite project — it
 has its own `typecheck` script that the root script invokes). Do not treat a
 change as verified until `pnpm verify` is green from a clean checkout.
-

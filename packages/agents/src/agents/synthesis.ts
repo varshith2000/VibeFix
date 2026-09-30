@@ -12,6 +12,7 @@ import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from ".
 import { definitionFor } from "../definitions.js";
 import { decide } from "../runtime/decision-agent.js";
 import { categoryExplanation, beforeAfterMermaid } from "../shared/explain.js";
+import { findingFingerprint } from "../shared/findings.js";
 
 const SCOPE_TEMPLATES: Record<string, (f: Finding) => string[]> = {
   "extract-function": (f) => [fileOf(f)],
@@ -60,10 +61,11 @@ export class Synthesis implements VibeFixAgent {
       const riskArtifact = await ctx.store.latest("risk-assessments");
       const risks = riskArtifact ? RiskAssessmentsArtifactSchema.parse(riskArtifact.data).assessments : {};
 
-      // Dedupe: same category + same file = one finding (keep highest evidence count).
+      // Dedupe by defect content. Distinct defects in the same file must not
+      // collapse merely because they share a category and recommendation.
       const byKey = new Map<string, Finding>();
       for (const f of findings) {
-        const key = `${f.category}::${f.recommendedChangeCategory}::${fileOf(f)}`;
+        const key = findingFingerprint(f);
         const existing = byKey.get(key);
         if (!existing || f.evidence.length > existing.evidence.length) byKey.set(key, f);
       }

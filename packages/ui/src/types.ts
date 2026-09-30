@@ -131,6 +131,7 @@ export interface RepoConfig {
   };
   defaultMode: string;
   protectedPaths: string[];
+  executionPolicy: { allowRepositoryCommands: boolean };
   analyzer: { sidecarCommand?: string[]; sidecarProtocolVersion: number };
 }
 

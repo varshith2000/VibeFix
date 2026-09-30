@@ -22,6 +22,21 @@ export async function main(): Promise<void> {
   }
   const registry = new ProjectRegistry();
   const app = await buildApp(registry);
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[vibefix] ${signal} received; draining requests and runs before shutdown`);
+    try {
+      await app.close();
+      await registry.shutdown();
+    } catch (err) {
+      console.error(`[vibefix] graceful shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+  };
+  process.once("SIGINT", () => { void shutdown("SIGINT"); });
+  process.once("SIGTERM", () => { void shutdown("SIGTERM"); });
   try {
     await app.listen({ port: PORT, host: HOST });
     console.log(`VibeFix control plane listening on http://${HOST}:${PORT}`);

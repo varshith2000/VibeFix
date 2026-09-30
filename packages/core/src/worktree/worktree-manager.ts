@@ -38,13 +38,20 @@ export class WorktreeManager {
     debug("worktree", `Creating worktree for proposal ${proposalId}, attempt ${attempt}`);
     
     try {
+      const baseCommit = await this.git.headCommit();
+      if (!baseCommit) throw new Error("cannot create a worktree without a base commit");
       await fs.mkdir(path.dirname(wtPath), { recursive: true });
       const res = await this.git.addWorktree(wtPath, branch);
       if (res.code !== 0) {
         error("worktree", `Worktree add failed for ${slug}: ${res.stderr}\n${res.stdout}`);
         throw new Error(`worktree add failed: ${res.stderr}\n${res.stdout}`);
       }
-      const baseCommit = await this.git.headCommit();
+      const worktreeHead = await new GitTool(wtPath).headCommit();
+      if (worktreeHead !== baseCommit) {
+        await this.git.removeWorktree(wtPath, true).catch(() => undefined);
+        await this.git.deleteBranch(branch, true).catch(() => undefined);
+        throw new Error(`worktree base moved during creation (expected ${baseCommit}, got ${worktreeHead ?? "none"})`);
+      }
       await this.linkNodeModules(wtPath);
       info("worktree", `Successfully created worktree ${slug} at ${wtPath}`);
       return { proposalId, attempt, branch, path: wtPath, baseCommit };
@@ -60,7 +67,13 @@ export class WorktreeManager {
   }
 
   async changedFiles(handle: WorktreeHandle): Promise<string[]> {
-    return this.git.changedFiles(handle.path);
+    return this.git.pendingChangedFiles(handle.path);
+  }
+
+  /** Diff of the exact committed attempt, never the now-clean working tree. */
+  async committedDiff(handle: WorktreeHandle, ref = "HEAD"): Promise<string> {
+    if (!handle.baseCommit) throw new Error("worktree has no recorded base commit");
+    return this.git.diffBetween(handle.baseCommit, ref, handle.path);
   }
 
   /** Commit everything inside the worktree; returns the commit ref. */
@@ -74,9 +87,18 @@ export class WorktreeManager {
    * the attempt is treated as failed and the user's branch left untouched.
    */
   async landOnMainBranch(handle: WorktreeHandle, ref: string): Promise<{ ok: boolean; conflict: boolean }> {
+    if (!handle.baseCommit) throw new Error("cannot land a worktree without a recorded base commit");
+    const currentHead = await this.git.headCommit();
+    if (currentHead !== handle.baseCommit) {
+      warn("worktree", `Refusing to land ${handle.proposalId}: user branch moved from ${handle.baseCommit} to ${currentHead}`);
+      return { ok: false, conflict: true };
+    }
     const pick = await this.git.cherryPick(ref);
     if (pick.code === 0) return { ok: true, conflict: false };
-    await this.git.cherryPickAbort();
+    const abort = await this.git.cherryPickAbort();
+    if (abort.code !== 0) {
+      throw new Error(`cherry-pick failed and abort could not restore the user branch: ${abort.stderr || abort.stdout}`);
+    }
     return { ok: false, conflict: true };
   }
 

@@ -14,6 +14,7 @@ import { registerFindingRoutes } from "./routes/findings.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerWebsocketGateway } from "./websocket/gateway.js";
+import { redactSecrets } from "@vibefix/schemas";
 
 export type { BuildAppOptions } from "./context.js";
 
@@ -22,7 +23,20 @@ export async function buildApp(registry: ProjectRegistry, options: BuildAppOptio
   const apiToken = security.token ?? await getApiToken();
   const allowedOrigins = security.allowedOrigins ?? defaultAllowedOrigins();
   const app = Fastify({
-    logger: { level: process.env.VIBEFIX_LOG ?? "info" },
+    logger: {
+      level: process.env.VIBEFIX_LOG ?? "info",
+      serializers: {
+        req(request) {
+          const rawUrl = typeof request.url === "string" ? request.url : "";
+          return {
+            method: request.method,
+            url: redactSecrets(rawUrl.replace(/([?&]token=)[^&]*/gi, "$1[REDACTED]")),
+            hostname: request.hostname,
+            remoteAddress: request.ip,
+          };
+        },
+      },
+    },
     bodyLimit: 1_000_000,
     maxParamLength: 1000,
   });

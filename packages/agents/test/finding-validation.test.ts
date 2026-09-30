@@ -14,6 +14,21 @@ const candidate = (overrides: Partial<Parameters<typeof validateLlmFindingAgains
 });
 
 describe("findingFingerprint (content dedupe, not title dedupe)", () => {
+  it("uses stable finding IDs independent of process-global ordering", () => {
+    const input = {
+      title: "Stable",
+      location: "src/app.ts:12",
+      evidence: ["src/app.ts has a cycle"],
+      impact: "impact",
+      category: "architecture" as const,
+      recommendedChangeCategory: "introduce-boundary" as const,
+    };
+    const first = makeFinding(input);
+    makeFinding({ ...input, location: "src/other.ts" });
+    const repeated = makeFinding(input);
+    expect(repeated.findingId).toBe(first.findingId);
+  });
+
   it("same defect with different titles merges", () => {
     const a = { category: "architecture", location: "src/app.ts:42", evidence: ["imports db", "renders ui"], recommendedChangeCategory: "extract-service" };
     const b = { category: "architecture", location: "src/app.ts", evidence: ["renders ui", "imports db"], recommendedChangeCategory: "extract-service" };

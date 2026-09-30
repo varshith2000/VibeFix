@@ -88,6 +88,7 @@ const TEST_CONFIG = {
   },
   defaultMode: "minimal",
   protectedPaths: [],
+  executionPolicy: { allowRepositoryCommands: true },
   analyzer: { sidecarProtocolVersion: 1 },
 } as const;
 
@@ -158,8 +159,9 @@ describe("VibeFix end-to-end (scripted test doubles)", () => {
     }
 
     const ledgerPath = runPaths(repoPath, runtime.runId).ledgerFile;
-    const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { entries: unknown[] };
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { entries: Array<{ diff?: string }> };
     expect(ledger.entries.length).toBeGreaterThan(0);
+    expect(ledger.entries.some((entry) => entry.diff?.includes("_formatUserLine"))).toBe(true);
 
     const reportPath = runPaths(repoPath, runtime.runId).reportFile;
     const report = await readFile(reportPath, "utf8");

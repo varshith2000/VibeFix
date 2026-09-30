@@ -18,11 +18,12 @@ export class PrincipleReviewer implements VibeFixAgent {
       return rejected("principle-reviewer requires a proposal and worktree");
     }
     const { proposal, worktree } = ctx;
+    if (!worktree.baseCommit) return rejected("verification requires a recorded worktree base commit");
     try {
       await ctx.progress("reviewing principle compliance");
       const git = new GitTool(worktree.path);
-      const diff = await git.diffHead(worktree.path);
-      const changed = await git.changedFiles(worktree.path);
+      const diff = await git.diffBetween(worktree.baseCommit, "HEAD", worktree.path);
+      const changed = await git.changedFilesBetween(worktree.baseCommit, "HEAD", worktree.path);
       const gates: GateResult[] = [];
 
       // Deterministic: no drive-by files outside scope (reinforces firewall).

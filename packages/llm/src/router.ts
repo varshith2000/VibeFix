@@ -22,6 +22,7 @@ import { OpenRouterDecisionClient } from "./providers/openrouter.js";
 import { OpenRouterTextClient } from "./providers/openrouter-text.js";
 import { MockTextClient } from "./providers/mock-text.js";
 import { MockDecisionClient } from "./providers/mock-decision.js";
+import { redactSecrets } from "@vibefix/schemas";
 
 export type UsageSink = (agentId: string, providerId: string, usage: TokenUsage) => void;
 
@@ -79,7 +80,14 @@ class MeteredText implements TextGenerationClient {
   async complete<T = unknown>(
     options: CompleteOptions & { responseSchema?: z.ZodType<T> },
   ): Promise<CompleteResult<T>> {
-    const result = await this.inner.complete(options);
+    const result = await this.inner.complete({
+      ...options,
+      system: options.system ? redactSecrets(options.system) : options.system,
+      messages: options.messages.map((message) => ({
+        ...message,
+        content: redactSecrets(message.content),
+      })),
+    });
     this.sink?.(this.agentId, result.providerId, result.usage);
     return result;
   }
@@ -99,7 +107,7 @@ class MeteredDecision implements TypedDecisionClient {
     return this.inner.model;
   }
   async decide(request: DecisionRequest): Promise<DecisionResult> {
-    const result = await this.inner.decide(request);
+    const result = await this.inner.decide({ ...request, context: redactSecrets(request.context) });
     this.sink?.(this.agentId, result.providerId, result.usage);
     return result;
   }

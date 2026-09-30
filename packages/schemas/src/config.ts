@@ -8,6 +8,13 @@ export const RepoConfigSchema = z.object({
   defaultMode: RefactoringModeSchema.default("minimal"),
   /** Extra user-declared do-not-touch globs, merged into forbidden zones. */
   protectedPaths: z.array(z.string()).default([]),
+  /** Repository scripts are untrusted code. Execution is denied until the
+   * operator explicitly enables it for this project. */
+  executionPolicy: z
+    .object({
+      allowRepositoryCommands: z.boolean().default(false),
+    })
+    .default({ allowRepositoryCommands: false }),
   /** Deterministic analysis adapters (Python sidecar seam). Reserved. */
   analyzer: z
     .object({

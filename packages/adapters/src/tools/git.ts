@@ -154,12 +154,56 @@ export class GitTool {
     return res.code === 0 ? res.stdout : "";
   }
 
+  /** Canonical diff for a committed worktree attempt. */
+  async diffBetween(baseRef: string, headRef = "HEAD", cwd?: string): Promise<string> {
+    const args = ["diff", "--binary", baseRef, headRef, "--"];
+    const res = cwd
+      ? await runCommand("git", args, { cwd, timeoutMs: 30_000 })
+      : await this.git(args);
+    if (res.code !== 0) {
+      throw new Error(`git diff ${baseRef}..${headRef} failed: ${(res.stderr || res.stdout).slice(0, 500)}`);
+    }
+    return res.stdout;
+  }
+
   async changedFiles(cwd?: string): Promise<string[]> {
     const res = cwd
       ? await runCommand("git", ["diff", "--name-only", "HEAD"], { cwd, timeoutMs: 30_000 })
       : await this.git(["diff", "--name-only", "HEAD"]);
     if (res.code !== 0) return [];
     return res.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  /** Changed paths for a committed attempt, including files newly added by it. */
+  async changedFilesBetween(baseRef: string, headRef = "HEAD", cwd?: string): Promise<string[]> {
+    const args = ["diff", "--name-only", baseRef, headRef, "--"];
+    const res = cwd
+      ? await runCommand("git", args, { cwd, timeoutMs: 30_000 })
+      : await this.git(args);
+    if (res.code !== 0) {
+      throw new Error(`git diff --name-only ${baseRef}..${headRef} failed: ${(res.stderr || res.stdout).slice(0, 500)}`);
+    }
+    return res.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
+  /** Pending paths before commit. `git diff` alone omits untracked files. */
+  async pendingChangedFiles(cwd?: string): Promise<string[]> {
+    const target = cwd ?? this.root;
+    const res = await runCommand("git", ["status", "--porcelain", "--untracked-files=all"], {
+      cwd: target,
+      timeoutMs: 30_000,
+    });
+    if (res.code !== 0) {
+      throw new Error(`git status failed: ${(res.stderr || res.stdout).slice(0, 500)}`);
+    }
+    return res.stdout
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+      .map((file) => {
+        const renameTarget = file.includes(" -> ") ? file.split(" -> ").at(-1)! : file;
+        return renameTarget.replace(/^"|"$/g, "").replace(/\\/g, "/");
+      });
   }
 
   async commitAll(message: string, cwd?: string): Promise<{ ok: boolean; ref: string | null }> {

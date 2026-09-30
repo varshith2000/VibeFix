@@ -25,8 +25,18 @@ export function makeFinding(input: {
   /** Parser/probe status, e.g. "typescript-5 AST" or "regex fallback". */
   parserStatus?: string;
 }): Finding {
+  const stableKey = [
+    input.category,
+    input.location.trim().replace(/\\/g, "/").replace(/:\d+$/, "").toLowerCase(),
+    input.recommendedChangeCategory,
+    [...input.evidence].map((line) => line.trim().replace(/\s+/g, " ").toLowerCase()).sort().join("|"),
+  ].join("\u0000");
+  const numericId = BigInt(`0x${createHash("sha256").update(stableKey).digest("hex").slice(0, 15)}`)
+    % 1_000_000_000_000n;
   return {
-    findingId: nextFindingId(),
+    // Content-derived IDs survive concurrency and process restart. The schema
+    // keeps its historical numeric FND shape for artifact compatibility.
+    findingId: `FND-${numericId.toString().padStart(12, "0")}`,
     title: input.title,
     location: input.location,
     evidence: input.evidence,

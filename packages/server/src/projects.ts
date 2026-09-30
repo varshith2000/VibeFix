@@ -180,6 +180,11 @@ export class ProjectRegistry {
   async settle(runId: string): Promise<void> {
     await this.background.get(runId);
   }
+
+  /** Stop accepting work only after every tracked run has settled. */
+  async shutdown(): Promise<void> {
+    await Promise.allSettled([...this.background.values()]);
+  }
 }
 
 function isTerminalStatus(status: RunState["status"]): boolean {

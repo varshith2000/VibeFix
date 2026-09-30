@@ -99,6 +99,7 @@ export class RunManager {
     this.config.routing.budgets.warnFraction = next.routing.budgets.warnFraction;
     this.config.defaultMode = next.defaultMode;
     this.config.protectedPaths = next.protectedPaths;
+    this.config.executionPolicy = next.executionPolicy;
     this.config.analyzer = next.analyzer;
   }
 

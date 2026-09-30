@@ -203,6 +203,28 @@ export function SettingsPanel({
 
         {/* Cost limits */}
         <section>
+          <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            Repository command execution
+          </h4>
+          <label className="flex items-start gap-2 rounded border border-amber-900/60 bg-amber-950/20 p-2.5 text-xs text-slate-300">
+            <input
+              type="checkbox"
+              checked={draft.executionPolicy.allowRepositoryCommands}
+              onChange={(event) => setDraft((current) => ({
+                ...current!,
+                executionPolicy: { allowRepositoryCommands: event.target.checked },
+              }))}
+              className="mt-0.5"
+            />
+            <span>
+              Allow this repository&apos;s test, build, typecheck, and lint scripts to run on this machine.
+              These commands are untrusted code. When disabled, verification fails closed and no change lands.
+            </span>
+          </label>
+        </section>
+
+        {/* Cost limits */}
+        <section>
           <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Cost limits</h4>
           <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
             <LabeledNumber

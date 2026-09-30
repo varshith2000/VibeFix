@@ -168,11 +168,10 @@ export class OrchestratorRuntime {
         }
       } catch (err) {
         console.error(`[VibeFix] Effect execution failed for ${effect.effect}:`, err);
-        // Continue with other effects unless it's a critical failure
-        if (effect.effect === "EmitEvent") {
-          // Event emission failure is critical - we should log and continue
-          console.warn(`[VibeFix] Continuing despite event emission failure`);
-        }
+        // Effects drive the state machine. Swallowing one leaves persisted
+        // state claiming work is active even though no worker remains. Let the
+        // server's background tracker convert the failure into a durable FATAL.
+        throw err;
       }
       if (this.deps.meter.exceeded) {
         await this.dispatch({ type: "BUDGET_EXCEEDED" });
@@ -339,8 +338,14 @@ export class OrchestratorRuntime {
       return;
     }
 
-    const diff = await this.deps.worktrees.diff(handle);
-    if (diff.trim().length === 0) {
+    if (this.executionWasCancelled()) {
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
+      return;
+    }
+
+    const pendingFiles = await this.deps.worktrees.changedFiles(handle);
+    const pendingDiff = await this.deps.worktrees.diff(handle).catch(() => "");
+    if (pendingFiles.length === 0) {
       // Empty diff is a FAILED attempt — never auto-pass a no-op as "safe".
       await this.appendLedger({
         proposalId, attempt, handle, diff: "",
@@ -360,12 +365,29 @@ export class OrchestratorRuntime {
     const commit = await this.deps.worktrees.commit(handle, `vibefix: ${proposal.title} (${proposalId})`);
     if (!commit.ok || !commit.ref) {
       await this.appendLedger({
-        proposalId, attempt, handle, diff,
+        proposalId, attempt, handle,
+        diff: pendingDiff || `pending files:\n${pendingFiles.join("\n")}`,
         verdict: "rejected",
         verifierNotes: ["failed to commit the worktree"],
       });
       await this.deps.worktrees.discard(handle).catch(() => undefined);
       await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason: "commit failed" });
+      return;
+    }
+    const diff = await this.deps.worktrees.committedDiff(handle, commit.ref);
+    if (diff.trim().length === 0) {
+      await this.appendLedger({
+        proposalId, attempt, handle, diff: "",
+        verdict: "rejected",
+        verifierNotes: ["committed attempt has no diff from its recorded base commit"],
+      });
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
+      await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason: "empty committed diff" });
+      return;
+    }
+
+    if (this.executionWasCancelled()) {
+      await this.deps.worktrees.discard(handle).catch(() => undefined);
       return;
     }
 
@@ -395,9 +417,17 @@ export class OrchestratorRuntime {
         break; // fail-fast; remaining gates unnecessary
       }
       notes.push(`${gate.agentId}: passed`);
+      if (this.executionWasCancelled()) {
+        await this.deps.worktrees.discard(handle).catch(() => undefined);
+        return;
+      }
     }
 
     if (allPassed) {
+      if (this.executionWasCancelled()) {
+        await this.deps.worktrees.discard(handle).catch(() => undefined);
+        return;
+      }
       const landed = await this.deps.worktrees.landOnMainBranch(handle, commit.ref);
       await this.appendLedger({
         proposalId, attempt, handle, diff,
@@ -427,6 +457,10 @@ export class OrchestratorRuntime {
       verdict: "rejected",
       reason: notes.find((n) => !n.endsWith(": passed")) ?? "verification pool rejected",
     });
+  }
+
+  private executionWasCancelled(): boolean {
+    return this.state.status === "aborted" || this.state.status === "failed";
   }
 
   private async safeExecute(def: AgentDefinition, input: AgentExecutionInput): Promise<AgentExecutionOutcome> {

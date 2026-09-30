@@ -65,22 +65,13 @@ interface RunFacts {
   importGraphAnalyzer: string;
   metrics: FileMetrics;
 }
-const factsCache = new Map<string, Promise<RunFacts>>();
-
 async function factsFor(repoPath: string): Promise<RunFacts> {
-  let cached = factsCache.get(repoPath);
-  if (!cached) {
-    cached = (async () => {
-      const fs = new NodeFsFacts();
-      const snapshot = await fs.snapshot(repoPath);
-      const graph = createImportGraph(repoPath, snapshot.files);
-      const importEdges = await graph.edges();
-      const metrics = await computeMetrics(repoPath, snapshot.files);
-      return { snapshot, importEdges, importGraphAnalyzer: graph.analyzer, metrics };
-    })();
-    factsCache.set(repoPath, cached);
-  }
-  return cached;
+  const fs = new NodeFsFacts();
+  const snapshot = await fs.snapshot(repoPath);
+  const graph = createImportGraph(repoPath, snapshot.files);
+  const importEdges = await graph.edges();
+  const metrics = await computeMetrics(repoPath, snapshot.files);
+  return { snapshot, importEdges, importGraphAnalyzer: graph.analyzer, metrics };
 }
 
 /**
@@ -91,6 +82,8 @@ async function factsFor(repoPath: string): Promise<RunFacts> {
 export class VibefixExecutor implements AgentExecutorPort {
   private readonly agents: Map<string, VibeFixAgent>;
   private readonly router: LlmRouter;
+  private readonly facts: Promise<RunFacts>;
+  private readonly runner: NodeTestRunner;
 
   constructor(
     private readonly services: RunServices,
@@ -98,6 +91,10 @@ export class VibefixExecutor implements AgentExecutorPort {
     agents?: Map<string, VibeFixAgent>,
   ) {
     this.agents = agents ?? buildAgents();
+    // One immutable snapshot per run. A new run gets fresh repository facts,
+    // while agents within the same run share a consistent view.
+    this.facts = factsFor(services.repoPath);
+    this.runner = new NodeTestRunner();
     this.router = new LlmRouter(services.config.routing, env, (agentId, providerId, usage) => {
       services.meter.record(usage.totalTokens, agentId, providerId);
     });
@@ -134,7 +131,7 @@ export class VibefixExecutor implements AgentExecutorPort {
       return { outcome: "passed", artifactIds: [] };
     }
 
-    const facts = await factsFor(this.services.repoPath);
+    const facts = await this.facts;
     const ctx: AgentExecutionContext = {
       def: definition,
       runState: input.runState,
@@ -142,7 +139,19 @@ export class VibefixExecutor implements AgentExecutorPort {
       store: this.services.store,
       tools: {
         fs: new NodeFsFacts(),
-        runner: new NodeTestRunner(),
+        runner: this.services.config.executionPolicy.allowRepositoryCommands
+          ? this.runner
+          : {
+              detectCommands: (root) => this.runner.detectCommands(root),
+              runCommand: async (_root, command) => ({
+                ok: false,
+                command,
+                exitCode: -1,
+                outputTail:
+                  "blocked by execution policy: enable repository commands explicitly in project settings",
+                durationMs: 0,
+              }),
+            },
         snapshot: facts.snapshot,
         importEdges: facts.importEdges,
         importGraphAnalyzer: facts.importGraphAnalyzer,
