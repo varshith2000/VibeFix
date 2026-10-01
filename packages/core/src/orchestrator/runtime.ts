@@ -302,7 +302,12 @@ export class OrchestratorRuntime {
 
     const handle = await this.deps.worktrees.create(proposalId, attempt);
     const zones = await this.forbiddenZones();
-    const firewall = new ChangeFirewall(proposal, zones);
+    const priorViolations = (await this.deps.store.list(undefined, "firewall-violation"))
+      .reduce((count, artifact) => {
+        const data = artifact.data as { proposalId?: unknown };
+        return data.proposalId === proposalId ? count + 1 : count;
+      }, 0);
+    const firewall = new ChangeFirewall(proposal, zones, priorViolations);
     const baseInput: AgentExecutionInput = {
       runState: this.snapshot(),
       proposal,

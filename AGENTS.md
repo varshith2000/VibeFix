@@ -60,13 +60,10 @@ change or extend that test in the same commit.
 
 ## Partially implemented (known gaps — do not rely on the missing part)
 
-- **WebSocket authentication** — the token reaches `/ws` via query param and
-  the auth hook; the in-handler re-check exists, but no test drives a real
-  socket upgrade (contract SEC-04).
-- **Secret redaction** — clone credentials never reach argv/`.git/config`
-  and stderr is scrubbed, but the central logger has no redaction pass
-  (contract SEC-10/DAT-03) and file contents sent to providers are not
-  redacted (DAT-02).
+- **Secret redaction** — logger and provider boundaries now redact the
+  versioned credential patterns, and sensitive files are excluded from
+  snapshots. A complete planted-secret canary across every persisted artifact
+  and error path is still missing (contract SEC-10/DAT-03).
 - **Event durability** — an append that fails disk write still reaches live
   subscribers; it is now *counted and surfaced* (`persistenceFailures`,
   `replayDegraded`) instead of silent, but the seq can still be reused after
@@ -79,23 +76,18 @@ change or extend that test in the same commit.
   409 (contract REL-01 target: atomic, persisted keys).
 - **Single writer per run** — no run lock; server and CLI can open the same
   run concurrently (contract REL-14).
-- **Execution policy for repo commands** — repo test/build commands still
-  execute on the host by default; no approval policy (contract SEC-12).
-- **Verification fail-closed** — with no decision provider routed, the
-  fallback can still auto-pass a gate (contract SAFE-10; the contract's
-  fail-closed target is not implemented).
-- **Engineer write containment** — `path.join` without resolved-path
-  containment in the engineer's write closure (contract SAFE-02).
-- **Cumulative firewall violations** — the violation counter resets per
-  attempt (contract SAFE-16).
+- **Primary-tree invariance proof** — worktree creation no longer edits the
+  primary Git config or shares `node_modules`, and engineer writes are
+  containment-checked, but a full primary-tree failure-injection test remains
+  (contract SAFE-01/SAFE-15).
 - **Graceful shutdown** — no signal handling; Ctrl-C can interrupt a
   cherry-pick on the user's branch (contract REL-13/SAFE-15).
 - **Resource limits** — several TBD values remain (contract §5); what exists
   (clone/run ceilings, timeouts, body limit) is tested, the rest is
   unbounded.
-- **Folder browser breadth** — `/api/fs/browse` can list any directory on
-  the machine. It is authenticated and is the project picker's core feature;
-  constrained browse roots remain a contract target (SEC-06).
+- **Folder browser configuration** — `/api/fs/browse` is constrained to
+  configured roots (defaulting to the user profile), but a multi-root policy
+  UI and a symlink-specific browse test remain (SEC-06/09).
 
 ## Not yet verified (claims from design, no covering test)
 

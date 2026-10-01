@@ -84,7 +84,6 @@ export class GitTool {
     }
     await this.git(["config", "user.name", "VibeFix"]);
     await this.git(["config", "user.email", "vibefix@local"]);
-    await this.git(["config", "core.longpaths", "true"]);
     const add = await this.git(["add", "-A"]);
     if (add.code !== 0) throw new Error(`git add failed: ${add.stderr.slice(0, 200)}`);
     const commit = await this.git(["commit", "-m", "vibefix: baseline snapshot before first run", "--allow-empty"]);
@@ -133,8 +132,6 @@ export class GitTool {
   }
 
   async addWorktree(worktreePath: string, branchName: string): Promise<ProcessResult> {
-    // Ensure Windows long-path tolerance inside this repo's config.
-    await this.git(["config", "core.longpaths", "true"]);
     return this.git(["worktree", "add", "-b", branchName, path.resolve(worktreePath)]);
   }
 

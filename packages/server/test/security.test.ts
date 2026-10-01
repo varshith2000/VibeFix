@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
+import { WebSocket } from "ws";
 import { buildApp } from "../src/app.js";
 import { ProjectRegistry } from "../src/projects.js";
 import { projectKey, runPaths } from "@vibefix/core";
@@ -68,6 +69,35 @@ describe("authentication", () => {
   it("tokenEquals handles length mismatches without throwing", () => {
     expect(tokenEquals("short", TOKEN)).toBe(false);
     expect(tokenEquals(TOKEN, TOKEN)).toBe(true);
+  });
+
+  it("rejects an unauthenticated real WebSocket upgrade", async () => {
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const wsUrl = address.replace(/^http/, "ws") + `/ws?runId=run_socketauth01&enc=${b64(home)}`;
+      const result = await new Promise<number | string>((resolve) => {
+        const socket = new WebSocket(wsUrl);
+        const timer = setTimeout(() => { socket.terminate(); resolve("timeout"); }, 3_000);
+        socket.once("unexpected-response", (_request, response) => {
+          clearTimeout(timer);
+          resolve(response.statusCode);
+        });
+        socket.once("close", (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+        socket.once("error", () => {
+          // Fastify may reject the upgrade before a WebSocket close frame.
+          clearTimeout(timer);
+          resolve("error");
+        });
+      });
+      expect([401, 4401, "error"]).toContain(result);
+    } finally {
+      await app.close();
+      app = await buildApp(new ProjectRegistry(), { security: { token: TOKEN } });
+      await app.ready();
+    }
   });
 });
 
@@ -175,6 +205,25 @@ describe("filesystem path containment", () => {
     expect(isPathInside(project, path.join(project, "a.txt"))).toBe(true);
     expect(isPathInside(project, sibling)).toBe(false);
     expect(isPathInside(project, project)).toBe(false);
+  });
+});
+
+describe("filesystem browse roots", () => {
+  it("rejects browsing outside explicitly allowed roots", async () => {
+    const restricted = await buildApp(new ProjectRegistry(), {
+      security: { token: TOKEN, allowedBrowseRoots: [home] },
+    });
+    await restricted.ready();
+    try {
+      const res = await restricted.inject({
+        method: "GET",
+        url: `/api/fs/browse?path=${encodeURIComponent(path.dirname(home))}`,
+        headers: auth,
+      });
+      expect(res.statusCode).toBe(403);
+    } finally {
+      await restricted.close();
+    }
   });
 });
 

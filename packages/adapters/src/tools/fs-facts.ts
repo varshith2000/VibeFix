@@ -23,6 +23,13 @@ export const IGNORED_DIRECTORIES = [
   ".cache",
 ];
 
+/** Secret-bearing files are not sent to analysis/model contexts. */
+export function isSensitiveFile(relPath: string): boolean {
+  const name = relPath.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
+  return name === ".env" || name.startsWith(".env.") ||
+    /(?:credentials|secret|private[-_]?key|id_rsa|id_ed25519)/i.test(name);
+}
+
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".ts": "typescript",
   ".tsx": "typescript",
@@ -90,6 +97,7 @@ async function walk(root: string, relDir: string, files: FileEntry[]): Promise<v
       await walk(root, rel, files);
     } else if (entry.isFile()) {
       const abs = path.join(root, rel);
+      if (isSensitiveFile(rel)) continue;
       let size = 0;
       let loc = 0;
       try {

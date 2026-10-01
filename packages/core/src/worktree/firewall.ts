@@ -30,7 +30,10 @@ export class ChangeFirewall {
   constructor(
     private readonly proposal: ChangeProposal,
     private readonly extraForbidden: readonly string[] = [],
-  ) {}
+    initialViolations = 0,
+  ) {
+    this.violations = initialViolations;
+  }
 
   canWrite(relativePosixPath: string): FirewallDecision {
     const path = relativePosixPath.replace(/\\/g, "/");

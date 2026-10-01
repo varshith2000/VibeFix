@@ -1,6 +1,5 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { existsSync } from "node:fs";
 import { GitTool } from "@vibefix/adapters";
 import { worktreesDir } from "../store/paths.js";
 import { debug, info, warn, error } from "../util/logger.js";
@@ -52,7 +51,6 @@ export class WorktreeManager {
         await this.git.deleteBranch(branch, true).catch(() => undefined);
         throw new Error(`worktree base moved during creation (expected ${baseCommit}, got ${worktreeHead ?? "none"})`);
       }
-      await this.linkNodeModules(wtPath);
       info("worktree", `Successfully created worktree ${slug} at ${wtPath}`);
       return { proposalId, attempt, branch, path: wtPath, baseCommit };
     } catch (err) {
@@ -142,18 +140,4 @@ export class WorktreeManager {
     }
   }
 
-  /**
-   * Reuse the main checkout's node_modules inside the worktree so tests run
-   * without a reinstall. Junction on Windows (no admin needed), symlink elsewhere.
-   */
-  private async linkNodeModules(wtPath: string): Promise<void> {
-    const source = path.join(this.repoPath, "node_modules");
-    const target = path.join(wtPath, "node_modules");
-    if (!existsSync(source) || existsSync(target)) return;
-    try {
-      await fs.symlink(source, target, process.platform === "win32" ? "junction" : "dir");
-    } catch {
-      // No symlink permission: agents fall back to `pnpm install --offline`.
-    }
-  }
 }

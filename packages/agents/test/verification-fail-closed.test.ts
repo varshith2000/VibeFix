@@ -210,4 +210,26 @@ describe("verification fails closed without a decision provider", () => {
       await rm(parent, { recursive: true, force: true });
     }
   });
+
+  it("rejects public API drift even without an explicit proposal constraint", async () => {
+    const { parent, worktree, baseCommit } = await makeChangedWorktree();
+    const captured: unknown[] = [];
+    try {
+      await writeFile(path.join(worktree, "src", "index.ts"), "const value = 2;\n");
+      await runCommand("git", ["add", "-A"], { cwd: worktree });
+      await runCommand("git", ["commit", "-m", "attempt"], { cwd: worktree });
+      const ctx = makeContext(worktree, baseCommit, captured);
+      ctx.store = {
+        latest: async (kind: string) => kind === "behavioral-baseline"
+          ? { data: { harnessBranch: "baseline", testFiles: [], baselineResults: { suiteAvailable: false }, excluded: [], publicApiSurface: ["src/index.ts::value"] } }
+          : null,
+        write: async (input: { data: unknown }) => { captured.push(input.data); return { artifactId: "artifact-test" }; },
+      } as unknown as AgentExecutionContext["store"];
+      const result = await new BehaviorVerifier().execute(ctx);
+      expect(result.outcome).toBe("rejected");
+      expect(captured[0]).toMatchObject({ gates: expect.arrayContaining([expect.objectContaining({ gate: "public-api-surface", result: "FAIL" })]) });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
 });

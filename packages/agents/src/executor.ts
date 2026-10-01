@@ -8,7 +8,8 @@ import {
   type RepoSnapshot,
 } from "@vibefix/adapters";
 import type { AgentExecutionInput, AgentExecutorPort, RunServices } from "@vibefix/core";
-import { LlmRouter } from "@vibefix/llm";
+import { LlmRouter, type CompleteOptions, type DecisionRequest, type TextGenerationClient, type TypedDecisionClient } from "@vibefix/llm";
+import { redactSecrets } from "@vibefix/schemas";
 import type { AgentDefinition } from "@vibefix/schemas";
 import { ArchitectureAuditor } from "./agents/arch-auditor.js";
 import { Cartographer } from "./agents/cartographer.js";
@@ -157,8 +158,8 @@ export class VibefixExecutor implements AgentExecutorPort {
         importGraphAnalyzer: facts.importGraphAnalyzer,
         metrics: facts.metrics,
       },
-      llm: this.safeText(definition),
-      decision: this.safeDecision(definition),
+      llm: redactTextClient(this.safeText(definition)),
+      decision: redactDecisionClient(this.safeDecision(definition)),
       proposal: input.proposal,
       worktree: input.worktree,
       firewall: input.firewall,
@@ -194,6 +195,28 @@ export class VibefixExecutor implements AgentExecutorPort {
       return undefined;
     }
   }
+}
+
+/** Provider boundary: repository-derived prompt text is always redacted. */
+export function redactTextClient(client: TextGenerationClient | undefined): TextGenerationClient | undefined {
+  if (!client) return undefined;
+  return {
+    ...client,
+    complete: async <T>(options: CompleteOptions & { responseSchema?: import("zod").ZodType<T> }) =>
+      client.complete<T>({
+        ...options,
+        system: options.system ? redactSecrets(options.system) : options.system,
+        messages: options.messages.map((message) => ({ ...message, content: redactSecrets(message.content) })),
+      }),
+  };
+}
+
+export function redactDecisionClient(client: TypedDecisionClient | undefined): TypedDecisionClient | undefined {
+  if (!client) return undefined;
+  return {
+    ...client,
+    decide: async (request: DecisionRequest) => client.decide({ ...request, context: redactSecrets(request.context) }),
+  };
 }
 
 /** Executor factory for RunManager.open(). */

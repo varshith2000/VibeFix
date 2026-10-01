@@ -82,7 +82,10 @@ export class BehaviorVerifier implements VibeFixAgent {
       const surfaceDiff = await this.surfaceDrift(ctx, worktree.path, changed, baseline);
       gates.push({
         gate: "public-api-surface",
-        result: surfaceDiff.length === 0 ? "PASS" : proposal.constraints.includes("no-public-api-change") ? "FAIL" : "PASS",
+        // Public API drift is always unsafe for behavior-preserving changes.
+        // A proposal constraint may document the invariant, but cannot opt out
+        // of this gate.
+        result: surfaceDiff.length === 0 ? "PASS" : "FAIL",
         details:
           surfaceDiff.length === 0
             ? "public API surface unchanged"

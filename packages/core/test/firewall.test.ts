@@ -84,4 +84,10 @@ describe("ChangeFirewall", () => {
     expect(fw.recordViolation("y", "r").autoReject).toBe(true);
     expect(fw.violationCount).toBe(2);
   });
+
+  it("continues the violation budget across retry attempts", () => {
+    const retry = new ChangeFirewall(proposal(), [], 1);
+    expect(retry.recordViolation("x", "r").autoReject).toBe(true);
+    expect(retry.violationCount).toBe(2);
+  });
 });

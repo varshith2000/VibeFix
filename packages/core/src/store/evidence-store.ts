@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   decodeArtifact,
   encodeArtifact,
+  redactUnknown,
   type ArtifactKind,
   type EvidenceArtifact,
 } from "@vibefix/schemas";
@@ -42,7 +43,7 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
       producer: input.producer,
       runId: input.runId,
       createdAt: new Date().toISOString(),
-      data: input.data,
+      data: redactUnknown(input.data),
       schemaVersion: 1 as const,
     };
     const { envelope, json } = encodeArtifact(artifact);

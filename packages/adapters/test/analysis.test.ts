@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { computeMetrics, measureTsFunctions } from "../src/tools/code-metrics.js";
 import { TsImportGraph, RegexImportGraph } from "../src/tools/import-graph.js";
+import { NodeFsFacts } from "../src/tools/fs-facts.js";
 import type { FileEntry } from "../src/capabilities.js";
 
 let dir: string;
@@ -64,6 +65,21 @@ describe("TS-AST code metrics", () => {
     // exactly why the analyzer label exists and is reported.)
     expect(metrics.analyzer).toBe("regex-heuristic");
     for (const fn of metrics.functions) expect(fn.analyzer).toBe("regex-heuristic");
+  });
+});
+
+describe("analysis secret boundary", () => {
+  it("excludes credential-shaped files from repository snapshots", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vibefix-sensitive-files-"));
+    try {
+      await writeFile(path.join(root, ".env"), "API_KEY=canary");
+      await writeFile(path.join(root, "credentials.json"), "{\"token\":\"canary\"}");
+      await writeFile(path.join(root, "safe.ts"), "export const safe = true;\n");
+      const snapshot = await new NodeFsFacts().snapshot(root);
+      expect(snapshot.files.map((file) => file.path)).toEqual(["safe.ts"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

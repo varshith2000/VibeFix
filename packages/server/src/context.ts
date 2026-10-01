@@ -15,6 +15,7 @@ export interface BuildAppOptions {
     clonesPerMinute?: number;
     maxConcurrentClones?: number;
     maxConcurrentRuns?: number;
+    allowedBrowseRoots?: string[];
   };
 }
 
@@ -34,6 +35,7 @@ export interface ServerContext {
   apiToken: string;
   maxConcurrentRuns: number;
   maxConcurrentClones: number;
+  allowedBrowseRoots: string[];
   cloneLimiter: RateLimiter;
   reserveClone(): boolean;
   releaseClone(): void;
@@ -55,6 +57,9 @@ export function createServerContext(
   const security = options.security ?? {};
   const maxConcurrentRuns = security.maxConcurrentRuns ?? Number(process.env.VIBEFIX_MAX_ACTIVE_RUNS ?? 4);
   const maxConcurrentClones = security.maxConcurrentClones ?? 2;
+  const allowedBrowseRoots = (security.allowedBrowseRoots ?? [process.env.USERPROFILE ?? process.env.HOME ?? ""])
+    .filter((root) => root.length > 0)
+    .map((root) => path.resolve(root));
   const cloneLimiter = new RateLimiter(60_000, security.clonesPerMinute ?? 10);
   let activeClones = 0;
   const idempotencyCache = new Map<string, { status: number; body: unknown }>();
@@ -123,6 +128,7 @@ export function createServerContext(
     apiToken,
     maxConcurrentRuns,
     maxConcurrentClones,
+    allowedBrowseRoots,
     cloneLimiter,
     reserveClone: () => {
       if (activeClones >= maxConcurrentClones) return false;

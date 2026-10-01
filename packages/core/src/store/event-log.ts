@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import type { AgentExecutionEvent, AgentExecutionEventType } from "@vibefix/schemas";
+import { redactSecrets, redactUnknown } from "@vibefix/schemas";
 import { eventId } from "../util/ids.js";
 import type { RunPaths } from "./paths.js";
 
@@ -88,6 +89,8 @@ export class EventLog {
           seq: this.seq + 1,
           type,
           ...fields,
+          ...(fields.message ? { message: redactSecrets(fields.message) } : {}),
+          ...(fields.payload !== undefined ? { payload: redactUnknown(fields.payload) } : {}),
         };
         await fs.appendFile(this.paths.eventsFile, `${JSON.stringify(event)}\n`, "utf8");
         this.seq = event.seq;

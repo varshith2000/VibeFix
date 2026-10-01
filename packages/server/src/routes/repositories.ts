@@ -6,14 +6,8 @@ import { NodeFsFacts } from "@vibefix/adapters";
 import { isPathInside } from "../policies/path-policy.js";
 import type { ServerContext } from "../context.js";
 
-async function listDrives(): Promise<string[]> {
-  if (process.platform !== "win32") return [];
-  const drives: string[] = [];
-  for (let code = 67; code <= 90; code++) {
-    const root = `${String.fromCharCode(code)}:\\`;
-    try { await fs.access(root); drives.push(root); } catch { /* drive not present */ }
-  }
-  return drives;
+function isBrowseRoot(pathname: string, roots: readonly string[]): boolean {
+  return roots.some((root) => pathname === root || isPathInside(root, pathname));
 }
 
 async function repoRoot(enc: string, reply: import("fastify").FastifyReply, context: ServerContext): Promise<string | null> {
@@ -33,8 +27,11 @@ export function registerRepositoryRoutes(app: FastifyInstance, context: ServerCo
   app.get("/api/fs/browse", async (req, reply) => {
     const requested = (req.query as { path?: string }).path;
     if (requested !== undefined && !path.isAbsolute(requested)) return reply.code(400).send({ error: "path must be absolute" });
-    const dir = requested && requested.trim().length > 0 ? path.resolve(requested) : homedir();
-    const drives = await listDrives();
+    const dir = requested && requested.trim().length > 0 ? path.resolve(requested) : path.resolve(homedir());
+    if (!isBrowseRoot(dir, context.allowedBrowseRoots)) {
+      return reply.code(403).send({ error: "browse path is outside the allowed browse roots" });
+    }
+    const drives = context.allowedBrowseRoots;
     let entries;
     try { entries = await fs.readdir(dir, { withFileTypes: true }); }
     catch { return { path: dir, parent: path.dirname(dir), dirs: [], gitDirs: [], drives, error: "cannot read this location" }; }

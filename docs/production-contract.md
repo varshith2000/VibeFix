@@ -75,8 +75,9 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Proving test:** `security.test.ts` (auth block: 401 without/with-wrong token, 200 via both headers, health public, length-safe compare) and the token-persistence block (generate → reuse; env override wins).
 - **Failure behavior:** 401, no state change.
 
-### SEC-04 — WebSocket connections require authentication — partially enforced — Owner: unassigned
-- **Current:** `/ws` is gated by the same auth hook (query token accepted — browsers cannot set headers on upgrades) plus an in-handler re-check that closes the socket with 4401; no test drives a real socket upgrade, so this stays partially enforced.
+### SEC-04 — WebSocket connections require authentication — enforced — Owner: unassigned
+- **Current:** `/ws` is gated by the same auth hook (query token accepted — browsers cannot set headers on upgrades) plus an in-handler re-check that closes the socket with 4401.
+- **Proving test:** `packages/server/test/security.test.ts` drives a real unauthenticated socket upgrade and observes the 401 refusal.
 - **Target:** socket-level test (unauthorized upgrade closed before any frame).
 - **Failure behavior (current):** upgrade refused / socket closed 4401; no frames sent.
 
@@ -87,9 +88,8 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Failure behavior:** preflight denied; foreign-origin requests 403; no data returned.
 
 ### SEC-06 — Projects cannot access another project's files or runs — partially enforced — Owner: unassigned
-- **Current:** every run route resolves through `/api/projects/:enc/runs/:runId/*` with registry/disk verification (see SEC-07, tested); the whole-disk `findRunDir` scan is removed; `/api/fs/browse` still lists any directory (authenticated — it is the project picker's core feature).
-- **Target:** browse restricted to registered roots (or moved to a desktop-only capability).
-- **Failure behavior (current):** cross-project run access ⇒ 404; browse remains broad by design until the target lands.
+- **Current:** every run route resolves through `/api/projects/:enc/runs/:runId/*` with registry/disk verification (see SEC-07, tested); `/api/fs/browse` is restricted to configured browse roots and rejects outside paths.
+- **Remaining:** browse roots are configuration-based rather than tied to registered projects, and symlink-specific browse coverage is still pending.
 
 ### SEC-07 — Run IDs are scoped to projects — enforced — Owner: unassigned
 - **Enforcement location:** `app.ts` `resolveRun` (live runtime must match the project's registry key, else the run dir must live under that project's `runs/`, else 404) + `security.ts` `isValidRunId` (shape validation, no traversal).
@@ -102,12 +102,12 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Failure behavior:** 400; no file read.
 
 ### SEC-09 — Symlink escapes are rejected; one documented exception — partially enforced — Owner: unassigned
-- **Current:** the `/file` route resolves `fs.realpath` for root and candidate and re-checks containment, so symlink escapes are rejected by construction; there is no symlink-specific test (creating symlinks is privilege-restricted on Windows CI). The worktree `node_modules` junction (`worktree-manager.ts`) deliberately crosses roots and remains the single documented exception.
+- **Current:** the `/file` route and engineer write path resolve `fs.realpath` and re-check containment. Worktrees no longer create a `node_modules` junction; there is still no server symlink-specific test (creating symlinks is privilege-restricted on Windows CI).
 - **Target:** symlink-planted test cases; realpath containment on engineer write targets (SAFE-002).
 - **Failure behavior (current):** resolved-outside-root paths ⇒ 400; no read.
 
 ### SEC-10 — Secrets are not written to logs, URLs, argv, reports, or persisted artifacts — partially enforced — Owner: unassigned
-- **Current (v3.1):** clone credentials never appear in argv, `.git/config`, or scrubbed stderr (SEC-11, tested); URLs with embedded credentials are rejected outright (tested). **Remaining:** the central logger has no redaction pass, and file contents sent to providers are not redacted (DAT-02).
+- **Current:** clone credentials never appear in argv, `.git/config`, or scrubbed stderr (SEC-11, tested); the central logger and provider client boundary apply the shared redaction utility; sensitive files are excluded from snapshots. **Remaining:** a planted-secret canary across every persisted artifact and error path is not yet complete.
 - **Target / measurable definition (review F-19):** "secret" = the versioned pattern list in the redaction utility: bearer/basic credentials, `x-access-token` URLs, `KEY=value` env lines, high-entropy strings (>20 chars) in value position. All such shapes pass through `redact()` at the logger, error-mapper, and event boundaries. Completeness is claimed **only** over the versioned pattern list plus planted canaries.
 - **Failure behavior (target):** redaction failure is a build-breaking test (GATE-11 canary); runtime detection logs a redacted placeholder, never the value.
 
@@ -117,8 +117,8 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Proving test:** `security.test.ts` (clone block: credential-URL rejection, scrubbing, store-file format, host allowlist) + live smoke (2026-09-28).
 - **Failure behavior:** clone failure returns scrubbed stderr; no credential persisted anywhere.
 
-### SEC-12 — Untrusted repository code is not executed without an explicit execution policy — contradicted — Owner: unassigned
-- **Current:** repo `test`/`typecheck`/`lint`/`build` commands execute on the host by default (`test-runner.ts`; `harness-builder.ts`; `verifier.ts`; `regression-sentinel.ts`).
+### SEC-12 — Untrusted repository code is not executed without an explicit execution policy — partially enforced — Owner: unassigned
+- **Current:** repository commands are denied by default by the per-project `executionPolicy`; the executor supplies a rejecting runner unless the operator explicitly enables commands. The remaining gap is isolation: enabled commands still run on the host.
 - **Target:** per-project policy (default analysis-only); commands shown to the operator for approval at registration/checkpoint.
 - **Interaction rule (review F-20, normative):** when the policy prevents baseline or post-change command execution, proposals **shall not land**; the run completes `not-verified` with changes left on the worktree branch for manual review. `NOT_APPLICABLE` gates never substitute for executable verification when landing.
 - **Failure behavior (target):** unapproved command ⇒ skipped, gate records `NOT_APPLICABLE (policy)`, landing blocked, report discloses "not verified".
@@ -126,7 +126,9 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 ### SEC-13 — All dangerous operations are audited — planned — Owner: unassigned
 - **Target:** the §7 event set with AUD-01 fields. **Failure behavior:** an operation without its audit event fails its test; at runtime, un-auditable dangerous operations are refused where feasible and logged as `E_NO_AUDIT` otherwise.
 
-### SEC-14 — Every request body is schema-validated — contradicted — Owner: unassigned
+### SEC-14 — Every request body is schema-validated — enforced — Owner: unassigned
+- **Current:** all mutating routes parse strict Zod request schemas before dispatch or persistence; unknown keys and invalid field types are rejected with field paths.
+- **Proving test:** `packages/server/test/request-validation.test.ts`.
 - **Current:** only `PUT /config` zod-validates; clone/runs/approve bodies are checked manually (type/shape guards added in v3.1) but not schema-validated (review F-25).
 - **Target:** zod schema per route; invalid ⇒ 400 `E_INVALID_BODY`, run state untouched, audit event.
 - **Failure behavior (target):** 400 with the schema violation path; no partial application.
@@ -208,14 +210,14 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 
 ## 4. Behavior-preservation (safety) contract
 
-### SAFE-01 — The original working tree is not modified before approval — contradicted — Owner: unassigned
-- **Current:** tracked files are untouched pre-approval (landing is post-approval + post-gates: `runtime.ts`). Violations: `core.longpaths` written to the user's `.git/config` at worktree creation (`git.ts`); `node_modules` junction lets worktree tests write into the user's checkout (`worktree-manager.ts`); the harness baseline run executes the repo test command **in the user's repo** (post-approval), which commonly writes caches/coverage into the working tree.
-- **Target:** `longpaths` scoped to worktree config or consented; per-worktree `node_modules` (copy/offline install) or read-only junction; baseline executed in a worktree snapshot.
+### SAFE-01 — The original working tree is not modified before approval — partially enforced — Owner: unassigned
+- **Current:** tracked files are untouched pre-approval; worktree creation no longer writes `core.longpaths` to the user's `.git/config` and no longer shares the user's `node_modules`. The harness baseline still executes commands from the primary checkout when explicitly enabled, so cache-producing commands remain a possible mutation.
+- **Target:** baseline executed in an isolated snapshot and a failure-injection test proves primary-tree invariance.
 - **Failure behavior (target):** any pre-approval mutation of the primary tree fails `primary-tree.test.ts` (git status, `.git/config`, `node_modules` hashes unchanged through checkpoint).
 
-### SAFE-02 — All writes occur inside the approved worktree, with resolved-path containment — contradicted — Owner: unassigned
-- **Current:** the engineer's write closure joins `path.join(worktree.path, …)` with **no containment check** (`engineer.ts`); `..`-bearing scope-matching paths can escape. (The server's read-side containment, SEC-08, is enforced — the write side is not.)
-- **Target:** resolve the absolute path and verify segment-aware containment on the **resolved** path before every write; reject with `E_PATH_ESCAPE` + firewall violation.
+### SAFE-02 — All writes occur inside the approved worktree, with resolved-path containment — enforced — Owner: unassigned
+- **Current:** `engineer.ts` resolves the worktree realpath, checks relative containment, walks unresolved parent directories for symlink escapes, and rejects with `E_PATH_ESCAPE` before writing.
+- **Proving test:** `packages/agents/test/engineer-containment.test.ts` covers parent traversal, absolute paths, and symlinked parents.
 - **Failure behavior (target):** escaping write rejected, violation recorded (feeds SAFE-016), attempt fails closed.
 
 ### SAFE-03 — The worktree starts from a recorded commit — planned — Owner: unassigned
@@ -230,7 +232,7 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 ### SAFE-05 — Changes are limited to approved files and operations — enforced — Owner: unassigned
 - **Enforcement location:** `packages/core/src/worktree/firewall.ts` (default-deny on `filesInScope`, `filesOutOfScope`, forbidden zones); auto-reject enforced at `engineer.ts`.
 - **Proving test:** `packages/core/test/firewall.test.ts` (scope, exclusion, auto-reject cases).
-- **Failure behavior:** denied write ⇒ violation artifact + auto-reject at 2 violations **per attempt** (cumulative behavior: SAFE-016). Note the firewall is an advisory API-boundary check, not an fs-level gate — containment is SAFE-02's job.
+- **Failure behavior:** denied write ⇒ violation artifact + auto-reject at 2 cumulative violations for the proposal. Note the firewall is an advisory API-boundary check, not an fs-level gate — containment is SAFE-02's job.
 
 ### SAFE-06 — Protected paths cannot be modified — enforced — Owner: unassigned
 - **Enforcement location:** `firewall.ts` (zones merged at `runtime.ts` `forbiddenZones`). **Test:** `firewall.test.ts`. **Failure behavior:** denial + violation record.
@@ -246,9 +248,9 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Current:** verifier `firewall-scope` gate compares `changedFiles` vs scope (`verifier.ts`); sentinel re-checks zones; untested directly.
 - **Failure behavior (current/target):** out-of-scope or zone-touching diff ⇒ gate FAIL ⇒ SAFE-011 path (no landing). **Target:** gate unit tests with planted violations.
 
-### SAFE-10 — Verification is structurally blinded and fails closed — contradicted — Owner: unassigned
-- **Current:** structural exclusion of `change-attempt` (`context-builder.ts`; `definitions.ts`; prompts `verifier.ts`) holds; **but** with no decision provider the fallback answers `choices[0]` = "yes" (pass) at confidence 0.3 (`decision-agent.ts`). Model diversity is **unsupported** (single provider by default, `routing.ts`).
-- **Target:** verification questions with no provider ⇒ gate `FAIL`/`NOT_VERIFIABLE`, nothing lands, report says "not verified". Prompt-level blindness remains backed by the data-flow exclusion (not prompt text alone).
+### SAFE-10 — Verification is structurally blinded and fails closed — partially enforced — Owner: unassigned
+- **Current:** structural exclusion of `change-attempt` holds; unavailable decision providers return `noul`, and verifier gates reject the change. Model diversity is **unsupported** (single provider by default, `routing.ts`).
+- **Proving test:** `packages/agents/test/verification-fail-closed.test.ts` covers unavailable providers and verifier rejection.
 - **Failure behavior (target):** unconfigured/misrouted decision capability ⇒ zero landed changes, run marked `not-verified`.
 
 ### SAFE-11 — Failed verification prevents completion — enforced — Owner: unassigned
@@ -305,8 +307,8 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 ## 6. Data and privacy contract
 
 - **DAT-01 Storage location — partially enforced.** Current/target per §1.1; failure: any run data outside `VIBEFIX_HOME` fails `paths.test.ts`.
-- **DAT-02 Provider payload scope — contradicted.** Current: in-scope file contents, diffs, metadata are sent; `.env` values are not; **no redaction — secrets in analyzed files are transmitted verbatim.** Target: versioned redaction pass (SEC-10) before any prompt; redaction disclosed in report. Failure: redaction miss ⇒ GATE-11 canary fails.
-- **DAT-03 Secret redaction — planned.** Target: shared `redact()` (versioned pattern list) at logger/error/event boundaries. Failure: masked placeholder, never the value.
+- **DAT-02 Provider payload scope — partially enforced.** Current: sensitive files are excluded from snapshots and provider-bound text/decision contexts pass through the versioned redaction boundary; planted canaries in those boundaries are covered. Remaining prompt construction and persisted-artifact canaries are not exhaustive. Target: redaction disclosed in the report and enforced for every provider payload.
+- **DAT-03 Secret redaction — partially enforced.** Current: shared `redactSecrets`/`redactUnknown` are used by the logger and provider boundary; clone errors are scrubbed. Failure-path and persisted-artifact canaries remain.
 - **DAT-04 Provider requests not logged — partially enforced → structural target.** Current: no persistence path exists for prompts/responses (behavioral absence, unfalsifiable — review F-03). Target: **structural non-persistability** — prompt/response types are not serializable into the logger/event schemas; lint rule forbids them in log calls. Failure: negative canary test + lint rule fail CI.
 - **DAT-05 Retention — planned.** Current: nothing is ever deleted (runs, worktrees, clones accumulate). Target: configurable retention + crash-safe periodic sweep (F-26). Failure: sweep failure retried and surfaced.
 - **DAT-06 User deletion — planned.** Target: `DELETE` routes for runs/projects removing dirs, worktrees, branches, clones + audit event. Failure: partial deletion ⇒ `E_DELETE_PARTIAL` listing remains.
@@ -347,12 +349,12 @@ Every gate names its proof. A gate without a green proof blocks the words "produ
 | GATE-03 | Lint | `pnpm lint` | **missing** — no linter configured; creating it is release work |
 | GATE-04 | Build | `pnpm build` (incl. UI) | **green** |
 | GATE-05 | Tests | `pnpm test` (97 passing: schemas/core/adapters/agents/server) | **green** |
-| GATE-06 | Security | auth/ws-auth/cors/isolation/traversal/validation suites (SEC-03..09, SEC-14) | **partial** — `packages/server/test/security.test.ts` covers auth, origin/CORS, traversal, isolation, rate/ceilings, clone credentials; WS-socket-level and per-route body-schema suites still missing |
+| GATE-06 | Security | auth/ws-auth/cors/isolation/traversal/validation suites (SEC-03..09, SEC-14) | **partial** — REST, body-validation, constrained-browse, and real socket-auth tests exist; symlink-specific and registered-root isolation coverage remain |
 | GATE-07 | Restart recovery | `recovery.test.ts` incl. kill-mid-run (REL-07/08) and kill-mid-landing (SAFE-15) | **missing** |
 | GATE-08 | WS replay | `ws-replay.test.ts` incl. deterministic connect interleave (F-15) | **partial** — bridge-level deterministic test exists (`runtime-correctness.test.ts`); no full-socket interleave test |
-| GATE-09 | Firewall | `firewall.test.ts` + containment (SAFE-002) + cumulative violations (SAFE-016) | partial |
-| GATE-10 | Behavior e2e | `e2e.test.ts` + primary-tree invariance (SAFE-01) + fail-closed no-provider (SAFE-10) | partial |
-| GATE-11 | Credential redaction | planted-canary scan across logs/artifacts/events/argv/`.git/config` (SEC-10/11, DAT-02/03/07) | **partial** — clone path enforced + live-smoke verified; logger/provider-payload canary suite missing |
+| GATE-09 | Firewall | `firewall.test.ts` + containment (SAFE-002) + cumulative violations (SAFE-016) | **partial** — scope, containment, and cumulative unit coverage exist; final diff and bypass tests remain |
+| GATE-10 | Behavior e2e | `e2e.test.ts` + primary-tree invariance (SAFE-01) + fail-closed no-provider (SAFE-10) | **partial** — fail-closed and fixture E2E exist; full primary-tree invariance is still unproven |
+| GATE-11 | Credential redaction | planted-canary scan across logs/artifacts/events/argv/`.git/config` (SEC-10/11, DAT-02/03/07) | **partial** — clone, logger/provider-boundary, and provider canary coverage exist; persisted-artifact/error-path canary remains |
 | GATE-12 | Resource limits | tests for RES-04/05/07/12/15 with numeric values set (F-02) | **partial** — RES-07/07b/07c set and tested; RES-04/05/10/13/14/15 remain TBD |
 | GATE-13 | Docs match implementation | re-audit + status-consistency check (F-21) + owner assigned to every blocker (F-01) | open (this v3.1 revision is the first re-audit step; owners still unassigned) |
 | GATE-14 | No critical known vulnerability | all open blocker-severity criteria in `docs/production-acceptance-criteria.md` closed | **open** |
@@ -368,17 +370,17 @@ Owner column per F-01; **every owner is currently `unassigned`** — assignment 
 | SEC-01 | Loopback default bind | partially enforced | `main.ts` default + `assertBindingAllowed` | `bind.test.ts` (create) | unassigned | No |
 | SEC-02 | Remote bind requires opt-in + auth | **enforced** | `security.ts` `assertBindingAllowed` | `security.test.ts` binding-guard (exists) | unassigned | No |
 | SEC-03 | REST authentication | **enforced** | `security.ts` `authHook` | `security.test.ts` auth block (exists) | unassigned | No |
-| SEC-04 | WS authentication | partially enforced | auth hook + in-handler 4401 check | socket-level ws-auth test | unassigned | **Yes** |
+| SEC-04 | WS authentication | **enforced** | auth hook + in-handler 4401 check | `security.test.ts` real upgrade test (exists) | unassigned | No |
 | SEC-05 | CORS allowlist | **enforced** | `app.ts` cors + `originCheckHook` | `security.test.ts` origin block (exists) | unassigned | No |
-| SEC-06 | Project isolation | partially enforced | `resolveRun`; browse breadth remains | constrained-browse test | unassigned | **Yes** |
+| SEC-06 | Project isolation | partially enforced | `resolveRun`; configured browse roots | constrained-browse test (exists) | unassigned | **Yes** |
 | SEC-07 | Run scoping | **enforced** | `app.ts` `resolveRun` | `security.test.ts` scoped-runs block (exists) | unassigned | No |
 | SEC-08 | Path-escape prevention | **enforced** | `security.ts` `isPathInside` | `security.test.ts` containment block (exists) | unassigned | No |
 | SEC-09 | Symlink rejection (+1 documented exception) | partially enforced | `/file` realpath re-check | traversal symlink cases | unassigned | **Yes** |
-| SEC-10 | Secret non-exposure (defined shapes + canaries) | partially enforced | clone path enforced; logger/provider redaction missing | GATE-11 canary | unassigned | **Yes** |
+| SEC-10 | Secret non-exposure (defined shapes + canaries) | partially enforced | clone path + logger/provider redaction + sensitive-file exclusion | GATE-11 canary (partial) | unassigned | **Yes** |
 | SEC-11 | Secure git credentials | **enforced** | `app.ts` clone + `security.ts` | `security.test.ts` clone block (exists) | unassigned | No |
-| SEC-12 | Execution policy (fail-closed landing) | contradicted | `test-runner.ts` | `exec-policy.test.ts` | unassigned | **Yes** |
+| SEC-12 | Execution policy (fail-closed landing) | partially enforced | `RepoConfig.executionPolicy` + executor rejecting runner | execution-policy coverage pending | unassigned | **Yes** |
 | SEC-13 | Dangerous ops audited | planned | — | audit tests | unassigned | Yes |
-| SEC-14 | Request-body validation | contradicted | `app.ts` (only `/config`) | `validation.test.ts` | unassigned | **Yes** |
+| SEC-14 | Request-body validation | **enforced** | route schemas + `parseRequestBody` | `request-validation.test.ts` | unassigned | No |
 | REL-01 | Idempotent, atomic commands | partially enforced | `app.ts` idempotency cache | concurrent + replay tests (replay exists) | unassigned | **Yes** |
 | REL-02 | Central transition validation | enforced | `reducer.ts` guards | `reducer.test.ts` (exists) | unassigned | No |
 | REL-03 | Persist before report | contradicted | `runtime.ts` (+violation sites; now surfaced) | persistence-failure test | unassigned | **Yes** |
@@ -393,8 +395,8 @@ Owner column per F-01; **every owner is currently `unassigned`** — assignment 
 | REL-12 | Child/timer cleanup | partially enforced | `git.ts` | Windows tree-kill test | unassigned | Yes |
 | REL-13 | Graceful shutdown incl. landing | planned | `main.ts` | shutdown test | unassigned | Yes |
 | REL-14 | Single-writer run lock | planned | — | concurrent-writer test | unassigned | **Yes** |
-| SAFE-01 | Primary tree unmodified pre-approval | contradicted | `runtime.ts` (+3 violation sites) | primary-tree test | unassigned | **Yes** |
-| SAFE-02 | Resolved-path worktree containment | contradicted | `engineer.ts` | `..`/symlink write test | unassigned | **Yes** |
+| SAFE-01 | Primary tree unmodified pre-approval | partially enforced | worktree manager; baseline still primary | primary-tree test pending | unassigned | **Yes** |
+| SAFE-02 | Resolved-path worktree containment | **enforced** | `engineer.ts` | `engineer-containment.test.ts` | unassigned | No |
 | SAFE-03 | Recorded base commit | planned | `git.ts` worktree add | base-commit test | unassigned | Yes |
 | SAFE-04 | Single-writer capability | partially enforced | `definitions.ts`, `runtime.ts` | permissions + lint rule | unassigned | **Yes** |
 | SAFE-05 | Approved-scope writes | enforced | `firewall.ts` | `firewall.test.ts` (exists) | unassigned | No (keep green) |
@@ -402,17 +404,17 @@ Owner column per F-01; **every owner is currently `unassigned`** — assignment 
 | SAFE-07 | Lockfile/manifest approval | enforced | `firewall.ts` | `firewall.test.ts` | unassigned | No |
 | SAFE-08 | Post-approval scope integrity | planned | `reducer.ts` | backlog-hash test | unassigned | Yes |
 | SAFE-09 | Final diff checked | partially enforced | `verifier.ts` | gate unit tests | unassigned | Yes |
-| SAFE-10 | Blinded, fail-closed verification | contradicted | `context-builder.ts`; gap `decision-agent.ts` | no-provider refusal test | unassigned | **Yes** |
+| SAFE-10 | Blinded, fail-closed verification | **enforced** | `context-builder.ts`; `decision-agent.ts`; verifier gates | `verification-fail-closed.test.ts` | unassigned | No |
 | SAFE-11 | Failed verification blocks completion | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
 | SAFE-12 | Retry limits (3 attempts) | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
 | SAFE-13 | Rollback/discard path | enforced (hardening req.) | `worktree-manager.ts` | `e2e.test.ts` | unassigned | No |
 | SAFE-14 | Human approval gate | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
 | SAFE-15 | Crash-recoverable landing | planned | `worktree-manager.ts` | kill-mid-cherry-pick test | unassigned | **Yes** |
-| SAFE-16 | Cumulative violation counter | planned | `runtime.ts` (reset defect) | per-proposal violation test | unassigned | Yes |
+| SAFE-16 | Cumulative violation counter | **enforced** | `runtime.ts` + `firewall.ts` | `firewall.test.ts` cumulative test | unassigned | No |
 | RES-01..16 | See §5 | mixed (7 TBD values remain; RES-07/07b/07c now set + tested) | §5 | limit tests once values set | unassigned | RES-01/04/05/10/13/14/15 block |
 | DAT-01..09 | See §6 | mixed (GitHub-token half of DAT-08 resolved via SEC-11) | §6 | §6 | unassigned | DAT-02/03/05/06/07 block |
 | AUD-01/02 | See §7 | partially enforced | §7 | audit tests | unassigned | Yes |
 | OBS-01..08 | See §8 | mixed (OBS-02/06 improved) | §8 | §8 | unassigned | OBS-01/04 block |
 | MIG-01..06 | See §9 | enforced: MIG-01/06 | `migrations.ts` | `roundtrip.test.ts` + new | unassigned | MIG-02 blocks |
 
-**Reading (v3.1):** 21 items enforced and test-proven (9 newly enforced by the repair program: SEC-02/03/05/07/08/11, REL-06/10/11; plus new tested limits RES-07b/07c within §5). **9 items remain contradicted** — SEC-12, SEC-14, REL-03, REL-08, SAFE-01, SAFE-02, SAFE-04, SAFE-10, DAT-02. The remainder are partially enforced or planned. **No claim of production-readiness is made by this document**; GATE-14 (all open blockers closed) is the sole arbiter, and it is not green.
+**Reading (v3.1, post security-phase implementation):** the security repair reduced the previously contradicted set to **2 items** — REL-03 and REL-08. SAFE-04 and DAT-02 remain partial because capability isolation and exhaustive redaction coverage are not complete. The remaining release blockers are primarily durability, capability isolation, and exhaustive redaction coverage. **No claim of production-readiness is made by this document**; GATE-14 (all open blockers closed) is the sole arbiter, and it is not green.
