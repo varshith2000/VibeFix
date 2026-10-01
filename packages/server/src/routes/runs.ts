@@ -16,12 +16,8 @@ export function registerRunRoutes(app: FastifyInstance, context: ServerContext):
       const runtime = await manager.loadRun(runId);
       registry.registerRuntime(runtime, manager.repoPath);
       const state = runtime.snapshot();
-      if (state.status === "running") {
-        console.log(`[VibeFix] Resuming interrupted run ${runId} from phase ${state.phase}`);
-        registry.track(runId, runtime.resume());
-      } else {
-        console.log(`[VibeFix] Loading completed run ${runId} for viewing`);
-      }
+      if (state.status === "interrupted") console.log(`[VibeFix] Loaded interrupted run ${runId}; explicit resume required`);
+      else console.log(`[VibeFix] Loading run ${runId} for viewing`);
       return { runId, state };
     } catch (err) {
       console.error(`[VibeFix] Failed to open run ${runId}:`, err);

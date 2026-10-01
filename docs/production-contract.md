@@ -138,24 +138,21 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 ## 3. Reliability and recovery contract
 
 ### REL-01 — State-changing commands carry idempotency keys, applied atomically — partially enforced — Owner: unassigned
-- **Current (v3.1):** `approve`/`reject`/`abort`/`resume` accept an `Idempotency-Key` header (or body field); a repeated key replays the original 200 response (`X-Idempotent-Replay: true`) without re-dispatching, and without a key the phase guard turns duplicates into a clean 409. Proving test: `packages/server/test/runtime-correctness.test.ts` (idempotency block, dispatch-counted doubles). **Remaining:** the cache is in-memory (process lifetime), keys are not atomic/persisted across restart.
-- **Target:** key check **and** transition in one critical section under the run lock (REL-14); outcomes persisted for replay across restart.
-- **Failure behavior (current):** replay returns the original outcome within one server process; restart-era duplicates are blocked by the phase guard.
+- **Current (v3.1):** `approve`/`reject`/`abort`/`resume` accept an `Idempotency-Key` header (or body field); a repeated key replays the original 200 response (`X-Idempotent-Replay: true`) without re-dispatching. Outcomes are atomically stored under `VIBEFIX_HOME/idempotency.json` and replay survives server reconstruction. Proving tests: `packages/server/test/runtime-correctness.test.ts` (including restart-context replay).
+- **Remaining:** key check and transition are not yet one cross-process critical section.
 
 ### REL-02 — State transitions are validated centrally — enforced — Owner: unassigned
 - **Enforcement location:** `packages/core/src/orchestrator/reducer.ts` (guards); terminal ignore in `runtime.ts` `reduceAndPersist`.
 - **Proving test:** `packages/core/test/reducer.test.ts` (4 guard cases).
 - **Failure behavior:** stale/out-of-phase events are no-ops with zero effects (tested).
 
-### REL-03 — State is persisted before success is reported — contradicted — Owner: unassigned
-- **Current:** run-state path holds (`runtime.ts`: atomic `state.json` write before effects; failure propagates — and since v3.1 a failed approval is an HTTP 500, never `ok:true`). Violations: events emitted despite failed append (`event-log.ts` — now **counted and surfaced** as `persistenceFailures`/`degraded`, REL-09); agent-failure state memory-only (`runtime.ts` `runAgentGuarded`); healed state not written back (`run-manager.ts` `loadRun`); initial write non-atomic.
-- **Target:** all closed; append retried with backoff; a non-persistable event sets a degraded flag and its `seq` is never reused (F-13).
-- **Failure behavior (current):** persistence failure surfaces as an error to the caller and a degraded indicator; a memory-only event's sequence number can still be reused after restart.
+### REL-03 — State is persisted before success is reported — partially enforced — Owner: unassigned
+- **Current:** state transitions and events persist before publication/reporting; event append failures reject and surface degradation. Initial state creation remains a direct write, and broader multi-file transition atomicity is not yet guaranteed.
+- **Failure behavior (current):** persistence failure surfaces as an error and degraded indicator.
 
 ### REL-04 — Events have monotonically increasing, never-reused sequence numbers — partially enforced — Owner: unassigned
-- **Current:** per-run in-memory counter recovered by line count (`event-log.ts`); seq consumed by failed appends is reused after restart (now *flagged*: failed appends increment `persistenceFailures` and mark the log degraded, surfaced via REST/WS — tested in `runtime-correctness.test.ts`); two `EventLog` instances per run (`run-manager.ts`).
-- **Target:** seq allocated only on durable write; single writer per run enforced by REL-14; atomic append.
-- **Failure behavior (target):** append failure ⇒ retry, then degraded flag; no emission with a seq that was not durably recorded.
+- **Current:** the counter resumes from the greatest valid persisted sequence, events are published only after append succeeds, and active runs use a single-writer lease. Proving test: `packages/core/test/durable-correctness.test.ts`.
+- **Remaining:** append durability is not an fsync-backed commit protocol.
 
 ### REL-05 — WebSocket clients recover missed events exactly — partially enforced — Owner: unassigned
 - **Current (v3.1):** the v3.0 protocol gap (subscribe *after* replay read — events in that window never sent, F-15) is **closed**: `/ws` bridges through `packages/server/src/ws-replay.ts` (subscribe-first into a buffer → replay → dedup-by-eventId flush → live), deterministically tested with events appended *during* the replay window (`runtime-correctness.test.ts` bridge block). Client side: `eventId` dedup plus sequence-gap detection (`seq > lastSeq+1` triggers a REST resync + fresh snapshot) — implemented, but there is no browser test harness.
@@ -169,16 +166,15 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Failure behavior:** as above; never partial data without a degraded flag.
 
 ### REL-07 — Process restart does not silently lose run state — partially enforced — Owner: unassigned
-- **Current:** durable state per transition; `loadRun` + `resume()` re-execute non-terminal agents (`run-manager.ts`; `runtime.ts` `resume`). Gaps: memory-only states (REL-03), event durability (REL-04), and **user-repo landing recovery (SAFE-015)**.
+- **Current:** durable state per transition; `loadRun` classifies interrupted runs and `resume()` explicitly re-executes non-terminal work. A landing journal recovers interrupted cherry-picks. Remaining gaps are the broader crash matrix and fsync-level durability.
 - **Failure behavior (target):** unrecoverable state ⇒ run `failed` with `E_STATE_UNRECOVERABLE`; recoverable ⇒ `interrupted` + resumable.
 
-### REL-08 — Interrupted runs are identified after restart — contradicted — Owner: unassigned
-- **Current:** healing guard skips `status === "running"` (`run-manager.ts` `loadRun`) — the common crash case stays falsely running.
-- **Target:** persisted clean-shutdown marker; on load, any non-clean run (including mid-`running`) becomes `interrupted` (new `RunState` status value); healed state persisted.
-- **Failure behavior (target):** kill -9 mid-run ⇒ next load reports `interrupted`, resumable, never `running`.
+### REL-08 — Interrupted runs are identified after restart — enforced — Owner: unassigned
+- **Current:** persisted `running` runs reload as `interrupted`, persist that status, and require explicit resume; intentional `paused` runs remain paused. Proving test: `packages/core/test/durable-correctness.test.ts`.
+- **Failure behavior:** a restarted mid-run is never silently auto-resumed or reported as running.
 
 ### REL-09 — Corrupt persistence is reported as degraded — partially enforced — Owner: unassigned
-- **Current (v3.1):** event-log reads count corrupt lines and failed appends, surfaced via the events endpoint and WS `{t:"degraded"}` frames; corrupt run state ⇒ 500 `{degraded:true}` — all tested (`runtime-correctness.test.ts`). **Remaining:** evidence-store `latest()/read()` still return silent `null` on corruption.
+- **Current (v3.1):** event-log reads count corrupt lines and failed appends, corrupt run state returns 500 `{degraded:true}`, and evidence `latest()/read()/list()` mark corruption and expose degraded metadata. Proving tests: `runtime-correctness.test.ts`, `durable-correctness.test.ts`.
 - **Target:** every read path returns a countable, machine-readable degraded indicator (run-level `degraded` flag + counters surfaced via OBS-06).
 - **Failure behavior (current):** event/state corruption ⇒ degraded indicator; artifact corruption still silent.
 
@@ -193,18 +189,13 @@ Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failu
 - **Failure behavior:** unregistrable runtime is dropped defensively; reads fall back to disk.
 
 ### REL-12 — Child processes and timers are cleaned up — partially enforced — Owner: unassigned
-- **Current:** timeouts + SIGKILL (`git.ts`); Windows `.cmd` shim kills may orphan grandchildren.
-- **Target:** process-tree termination (taskkill /T or equivalent); run-level sweep at abort/cleanup. **Failure behavior:** timeout ⇒ tree killed, non-ok result, `E_PROC_TIMEOUT` recorded.
+- **Current:** timeouts use SIGKILL on POSIX and `taskkill /T /F` for Windows `.cmd` shims. A dedicated Windows process-tree test remains outstanding.
 
-### REL-13 — Graceful shutdown, including the landing phase — planned — Owner: unassigned
-- **Current:** no signal handling (`main.ts`); Ctrl-C can tear mid-persist or **mid-cherry-pick on the user's branch** (SAFE-015).
-- **Target:** SIGINT/SIGTERM ⇒ stop intake, settle dispatch queue, finish-or-journal any in-flight landing (SAFE-15), flush, close WS, exit 0.
-- **Failure behavior (target):** shutdown journal guarantees the user repo is never left mid-cherry-pick without a recovery record.
+### REL-13 — Graceful shutdown, including the landing phase — partially enforced — Owner: unassigned
+- **Current:** SIGINT/SIGTERM close intake, abort active runs, drain tracked work, and enforce a shutdown timeout; landing is journaled and recovered on next open. A direct signal/shutdown integration test remains outstanding.
 
-### REL-14 — Single writer per run (process lock) — planned — Owner: unassigned
-- **Current:** none; server and CLI can open the same run concurrently; two `EventLog` instances already exist per run (`run-manager.ts`) (review F-04).
-- **Target:** `~/.vibefix/projects/<key>/runs/<id>/.lock` (O_EXCL/flock) on open; second opener gets read-only access or `E_RUN_LOCKED`.
-- **Failure behavior (target):** `E_RUN_LOCKED` with the holder's PID; no interleaved writes; stale locks (dead PID) reclaimed with an audit event.
+### REL-14 — Single writer per run (process lock) — enforced — Owner: unassigned
+- **Current:** `.run.lock` is acquired on run creation/open, rejects a live second writer with `E_RUN_LOCKED`, and reclaims a stale dead-PID lock. Proving test: `packages/core/test/durable-correctness.test.ts`.
 
 ---
 
@@ -381,20 +372,20 @@ Owner column per F-01; **every owner is currently `unassigned`** — assignment 
 | SEC-12 | Execution policy (fail-closed landing) | partially enforced | `RepoConfig.executionPolicy` + executor rejecting runner | execution-policy coverage pending | unassigned | **Yes** |
 | SEC-13 | Dangerous ops audited | planned | — | audit tests | unassigned | Yes |
 | SEC-14 | Request-body validation | **enforced** | route schemas + `parseRequestBody` | `request-validation.test.ts` | unassigned | No |
-| REL-01 | Idempotent, atomic commands | partially enforced | `app.ts` idempotency cache | concurrent + replay tests (replay exists) | unassigned | **Yes** |
+| REL-01 | Idempotent, atomic commands | partially enforced | persisted idempotency store + approval routes | replay across server reconstruction; cross-process atomicity remains | unassigned | **Yes** |
 | REL-02 | Central transition validation | enforced | `reducer.ts` guards | `reducer.test.ts` (exists) | unassigned | No |
-| REL-03 | Persist before report | contradicted | `runtime.ts` (+violation sites; now surfaced) | persistence-failure test | unassigned | **Yes** |
-| REL-04 | Monotonic, never-reused seq | partially enforced | `event-log.ts` (+failure counting) | `event-log.test.ts` | unassigned | **Yes** |
+| REL-03 | Persist before report | partially enforced | `runtime.ts` + `event-log.ts` | persistence-failure test | unassigned | **Yes** |
+| REL-04 | Monotonic, never-reused seq | partially enforced | `event-log.ts` + `run-lock.ts` | durable sequence test | unassigned | **Yes** |
 | REL-05 | Exact WS missed-event recovery | partially enforced | `ws-replay.ts` bridge (server side proven) | socket-level interleave | unassigned | **Yes** |
 | REL-06 | REST snapshot recovery | **enforced** | scoped run routes + degradation reporting | `runtime-correctness.test.ts` (exists) | unassigned | No |
-| REL-07 | Restart durability | partially enforced | `run-manager.ts` `loadRun`/`resume` | `recovery.test.ts` | unassigned | **Yes** |
-| REL-08 | Interrupted-run identification | contradicted | `run-manager.ts` healing guard | kill-9 → interrupted | unassigned | **Yes** |
-| REL-09 | Corrupt persistence → degraded | partially enforced | `event-log.ts` + routes (tested); evidence-store silent null remains | planted-corruption test (events/state exist) | unassigned | **Yes** |
+| REL-07 | Restart durability | partially enforced | `run-manager.ts` `loadRun`/`resume` + landing journal | durable recovery tests | unassigned | **Yes** |
+| REL-08 | Interrupted-run identification | **enforced** | `run-manager.ts` interrupted status | persisted-running recovery test | unassigned | No |
+| REL-09 | Corrupt persistence → degraded | partially enforced | `event-log.ts` + `evidence-store.ts` + routes | planted event/state/evidence corruption tests | unassigned | **Yes** |
 | REL-10 | Background failures visible | **enforced** | `app.ts` approve + `projects.ts` `track` | `runtime-correctness.test.ts` (exists) | unassigned | No |
 | REL-11 | Terminal runtime disposal | **enforced** | `projects.ts` `watchForTerminal` | `runtime-correctness.test.ts` (exists) | unassigned | No |
 | REL-12 | Child/timer cleanup | partially enforced | `git.ts` | Windows tree-kill test | unassigned | Yes |
-| REL-13 | Graceful shutdown incl. landing | planned | `main.ts` | shutdown test | unassigned | Yes |
-| REL-14 | Single-writer run lock | planned | — | concurrent-writer test | unassigned | **Yes** |
+| REL-13 | Graceful shutdown incl. landing | partially enforced | `main.ts` + `projects.ts` + landing journal | shutdown integration test remains | unassigned | Yes |
+| REL-14 | Single-writer run lock | **enforced** | `run-lock.ts` + `run-manager.ts` | concurrent-writer test | unassigned | No |
 | SAFE-01 | Primary tree unmodified pre-approval | partially enforced | worktree manager; baseline still primary | primary-tree test pending | unassigned | **Yes** |
 | SAFE-02 | Resolved-path worktree containment | **enforced** | `engineer.ts` | `engineer-containment.test.ts` | unassigned | No |
 | SAFE-03 | Recorded base commit | planned | `git.ts` worktree add | base-commit test | unassigned | Yes |
@@ -409,7 +400,7 @@ Owner column per F-01; **every owner is currently `unassigned`** — assignment 
 | SAFE-12 | Retry limits (3 attempts) | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
 | SAFE-13 | Rollback/discard path | enforced (hardening req.) | `worktree-manager.ts` | `e2e.test.ts` | unassigned | No |
 | SAFE-14 | Human approval gate | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
-| SAFE-15 | Crash-recoverable landing | planned | `worktree-manager.ts` | kill-mid-cherry-pick test | unassigned | **Yes** |
+| SAFE-15 | Crash-recoverable landing | **enforced** | `worktree-manager.ts` landing journal | interrupted-cherry-pick recovery test | unassigned | No |
 | SAFE-16 | Cumulative violation counter | **enforced** | `runtime.ts` + `firewall.ts` | `firewall.test.ts` cumulative test | unassigned | No |
 | RES-01..16 | See §5 | mixed (7 TBD values remain; RES-07/07b/07c now set + tested) | §5 | limit tests once values set | unassigned | RES-01/04/05/10/13/14/15 block |
 | DAT-01..09 | See §6 | mixed (GitHub-token half of DAT-08 resolved via SEC-11) | §6 | §6 | unassigned | DAT-02/03/05/06/07 block |
@@ -417,4 +408,4 @@ Owner column per F-01; **every owner is currently `unassigned`** — assignment 
 | OBS-01..08 | See §8 | mixed (OBS-02/06 improved) | §8 | §8 | unassigned | OBS-01/04 block |
 | MIG-01..06 | See §9 | enforced: MIG-01/06 | `migrations.ts` | `roundtrip.test.ts` + new | unassigned | MIG-02 blocks |
 
-**Reading (v3.1, post security-phase implementation):** the security repair reduced the previously contradicted set to **2 items** — REL-03 and REL-08. SAFE-04 and DAT-02 remain partial because capability isolation and exhaustive redaction coverage are not complete. The remaining release blockers are primarily durability, capability isolation, and exhaustive redaction coverage. **No claim of production-readiness is made by this document**; GATE-14 (all open blockers closed) is the sole arbiter, and it is not green.
+**Reading (v3.1, post security and durability implementation):** the durable-run work closed the previously contradicted interrupted-run case and added writer locking, persisted idempotency, landing recovery, and evidence degradation reporting. REL-03/04/07/09/12/13 and REL-01 remain partial where their stronger fsync, cross-process, or integration-test targets are not yet proven. SAFE-04 and DAT-02 remain partial because capability isolation and exhaustive redaction coverage are not complete. **No claim of production-readiness is made by this document**; GATE-14 remains the sole arbiter and is not green.

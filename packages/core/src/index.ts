@@ -9,6 +9,7 @@ export type { RunServices, ExecutorFactory } from "./orchestrator/run-manager.js
 // Store
 export { EvidenceStore, atomicWrite, type EvidenceReader, type EvidenceWriter } from "./store/evidence-store.js";
 export { EventLog, type ReplayResult } from "./store/event-log.js";
+export { RunLock } from "./store/run-lock.js";
 export { runPaths, runsDir, configPath, worktreesDir, vibefixHome, projectDir, projectKey, clonesDir, type RunPaths } from "./store/paths.js";
 
 // Safety layer

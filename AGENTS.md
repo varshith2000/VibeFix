@@ -52,6 +52,7 @@ change or extend that test in the same commit.
 | WS replay→live handoff without loss or duplication (subscribe-first bridge) | `packages/server/src/websocket/replay.ts`; compatibility export in `ws-replay.ts` | `runtime-correctness.test.ts` (bridge block) |
 | Idempotency keys on approve/reject/abort/resume (replay original 200) | `routes/approvals.ts`; `context.ts` | `runtime-correctness.test.ts` |
 | Explicit recovery degradation: corrupt event lines counted, corrupt `state.json` → 500 `{degraded}`, unpersisted events flagged | `event-log.ts`; `context.ts`; `routes/runs.ts`; `websocket/gateway.ts` | `runtime-correctness.test.ts` (degradation block) |
+| Durable run recovery: persist-before-publish events, non-reused sequences, per-run writer lease, interrupted-run classification, persisted idempotency replay, landing-journal recovery, and corrupt-evidence degradation | `store/event-log.ts`; `store/run-lock.ts`; `orchestrator/run-manager.ts`; `worktree/worktree-manager.ts`; server context | `packages/core/test/durable-correctness.test.ts`; `packages/server/test/runtime-correctness.test.ts` |
 | TS-AST code metrics with analyzer labels (`ts-ast` / `regex-heuristic`) | `adapters/src/tools/code-metrics.ts` | `packages/adapters/test/analysis.test.ts` |
 | Import graph via TypeScript module resolution (tsconfig paths, dynamic imports, export-from); regex fallback labeled | `adapters/src/tools/import-graph.ts` | `analysis.test.ts` |
 | LLM findings validated against the file snapshot (hallucinated locations rejected; unverifiable evidence demoted) | `agents/src/shared/findings.ts` | `packages/agents/test/finding-validation.test.ts` |
@@ -64,24 +65,24 @@ change or extend that test in the same commit.
   versioned credential patterns, and sensitive files are excluded from
   snapshots. A complete planted-secret canary across every persisted artifact
   and error path is still missing (contract SEC-10/DAT-03).
-- **Event durability** — an append that fails disk write still reaches live
-  subscribers; it is now *counted and surfaced* (`persistenceFailures`,
-  `replayDegraded`) instead of silent, but the seq can still be reused after
-  restart (contract REL-03/04 target: persist-before-publish).
-- **Interrupted-run detection** — a crash mid-run still reloads as
-  `running` (contract REL-08); `/open` auto-resumes it, which is recovery by
-  optimism, not by proof.
-- **Idempotency cache is in-memory** — replay works within one server
-  process lifetime only; cross-restart duplicates rely on the phase guard's
-  409 (contract REL-01 target: atomic, persisted keys).
-- **Single writer per run** — no run lock; server and CLI can open the same
-  run concurrently (contract REL-14).
+- **Event durability** — event appends persist before publication and resume
+  from the greatest persisted sequence; failed appends remain surfaced through
+  `persistenceFailures`/`replayDegraded`. Cross-process append coordination is
+  provided by the per-run writer lease.
+- **Interrupted-run detection** — a persisted `running` run reloads as
+  `interrupted` and requires explicit resume; intentionally paused runs remain
+  paused. A landing journal aborts an incomplete cherry-pick before reopening.
+- **Idempotency persistence** — command outcomes are atomically stored under
+  `VIBEFIX_HOME/idempotency.json`, so replay survives server reconstruction.
+- **Single writer per run** — `.run.lock` prevents concurrent writers and
+  recovers stale locks after an owner process exits.
 - **Primary-tree invariance proof** — worktree creation no longer edits the
   primary Git config or shares `node_modules`, and engineer writes are
   containment-checked, but a full primary-tree failure-injection test remains
   (contract SAFE-01/SAFE-15).
-- **Graceful shutdown** — no signal handling; Ctrl-C can interrupt a
-  cherry-pick on the user's branch (contract REL-13/SAFE-15).
+- **Graceful shutdown** — SIGINT/SIGTERM drain requests, abort active runs,
+  wait for tracked work, and bound shutdown time; landing recovery is journaled
+  if termination occurs during cherry-pick.
 - **Resource limits** — several TBD values remain (contract §5); what exists
   (clone/run ceilings, timeouts, body limit) is tested, the rest is
   unbounded.
@@ -96,8 +97,9 @@ change or extend that test in the same commit.
 - Behavior preservation on real repositories with real models (all E2E tests
   run scripted test doubles; real-provider smoke is manual:
   `scripts/smoke-real-providers.mjs`).
-- Windows child-process tree termination (`.cmd` shims may orphan
-  grandchildren — contract REL-12).
+- Windows child-process tree termination is implemented with `taskkill /T /F`
+  for timed-out `.cmd` shims; broader Windows process-tree coverage remains a
+  platform-level verification item.
 - Cost estimation, metrics, readiness probes, diagnostics bundles
   (contract OBS-03/05/07, RES-13 — planned, not built).
 

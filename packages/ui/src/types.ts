@@ -13,7 +13,7 @@ export type RunPhase =
   | "report"
   | "completed";
 
-export type RunStatus = "running" | "paused" | "awaitingApproval" | "aborted" | "failed" | "completed";
+export type RunStatus = "running" | "interrupted" | "paused" | "awaitingApproval" | "aborted" | "failed" | "completed";
 
 export type AgentRunStatus = "queued" | "running" | "passed" | "failed" | "rejected" | "skipped" | "deferred";
 

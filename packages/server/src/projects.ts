@@ -183,6 +183,17 @@ export class ProjectRegistry {
 
   /** Stop accepting work only after every tracked run has settled. */
   async shutdown(): Promise<void> {
+    const aborts: Promise<void>[] = [];
+    for (const [runId, entry] of this.runtimes) {
+      try {
+        const status = entry.runtime.snapshot().status;
+        if (status === "running" || status === "paused" || status === "awaitingApproval") {
+          aborts.push(entry.runtime.dispatch({ type: "ABORT" }).catch(() => undefined));
+        }
+      } catch { /* broken runtime is handled by persisted recovery */ }
+      void runId;
+    }
+    await Promise.allSettled(aborts);
     await Promise.allSettled([...this.background.values()]);
   }
 }

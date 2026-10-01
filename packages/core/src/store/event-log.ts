@@ -13,8 +13,8 @@ export interface ReplayResult {
 }
 
 /**
- * Append-only NDJSON event log + in-process bus. seq = line number, so a
- * reconnecting UI resyncs cheaply via GET /runs/:id/events?since=<seq>.
+ * Append-only NDJSON event log + in-process bus. Sequence numbers are read
+ * from durable events and continue from the greatest valid persisted seq.
  *
  * Degradation is EXPLICIT: failed appends are counted and never published to
  * live subscribers. A sequence is consumed only after its event is durable.
@@ -116,7 +116,15 @@ export class EventLog {
     try {
       const content = await fs.readFile(this.paths.eventsFile, "utf8");
       for (const line of content.split("\n")) {
-        if (line.trim()) this.seq += 1;
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line) as { seq?: unknown };
+          if (typeof parsed.seq === "number" && Number.isInteger(parsed.seq) && parsed.seq > this.seq) {
+            this.seq = parsed.seq;
+          }
+        } catch {
+          // Replay reports corrupt lines; valid sequence numbers remain usable.
+        }
       }
     } catch {
       // no events yet

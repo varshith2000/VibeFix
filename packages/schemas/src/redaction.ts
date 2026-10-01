@@ -1,4 +1,5 @@
 const REDACTED = "[REDACTED]";
+const SAFE_TOKEN_FIELDS = /^(?:tokensSpent|inputTokens|outputTokens|totalTokens|maxTokens|tokenCount|tokenBudget)$/i;
 
 /**
  * Versioned, deterministic boundary redaction for logs and provider payloads.
@@ -27,7 +28,7 @@ export function redactUnknown(value: unknown, seen = new WeakSet<object>()): unk
   seen.add(value);
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
-    output[key] = /token|secret|password|authorization|api[-_]?key/i.test(key)
+    output[key] = !SAFE_TOKEN_FIELDS.test(key) && /token|secret|password|authorization|api[-_]?key/i.test(key)
       ? REDACTED
       : redactUnknown(item, seen);
   }

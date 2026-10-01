@@ -14,7 +14,7 @@ export function registerApprovalRoutes(app: FastifyInstance, context: ServerCont
       if (!scope.runtime) return reply.code(409).send({ error: "run is not live in this server — open it first" });
       const runtime = scope.runtime;
       const idemKey = context.idempotencyKey(runId, req);
-      const cached = context.cachedIdempotency(idemKey);
+      const cached = await context.cachedIdempotency(idemKey);
       if (cached) return reply.code(cached.status).header("x-idempotent-replay", "true").send(cached.body);
       const state = runtime.snapshot();
       if (state.phase !== "awaitingApproval") return reply.code(409).send({ error: `run is in phase '${state.phase}', not awaitingApproval` });
@@ -25,7 +25,7 @@ export function registerApprovalRoutes(app: FastifyInstance, context: ServerCont
       try {
         await runtime.dispatch({ type: "CHECKPOINT_APPROVED", mode, approvedProposalIds: approved });
         const response = { ok: true, approved, mode };
-        context.rememberIdempotency(idemKey, 200, response);
+        await context.rememberIdempotency(idemKey, 200, response);
         return response;
       } catch (err) {
         console.error(`[VibeFix] Checkpoint approval failed for run ${runId}:`, err);
@@ -42,7 +42,7 @@ export function registerApprovalRoutes(app: FastifyInstance, context: ServerCont
     if (!scope) return reply;
     if (!scope.runtime) return reply.code(409).send({ error: "run is not live in this server — open it first" });
     const key = context.idempotencyKey(runId, req);
-    const cached = context.cachedIdempotency(key);
+    const cached = await context.cachedIdempotency(key);
     if (cached) return reply.code(cached.status).header("x-idempotent-replay", "true").send(cached.body);
     if (type === "CHECKPOINT_REJECTED" && scope.runtime.snapshot().phase !== "awaitingApproval") {
       return reply.code(409).send({ error: `run is in phase '${scope.runtime.snapshot().phase}', not awaitingApproval` });
@@ -50,7 +50,7 @@ export function registerApprovalRoutes(app: FastifyInstance, context: ServerCont
     const dispatch = type === "RESUME" ? scope.runtime.resume() : scope.runtime.dispatch({ type });
     await registry.track(runId, dispatch);
     const response = { ok: true };
-    context.rememberIdempotency(key, 200, response);
+    await context.rememberIdempotency(key, 200, response);
     return response;
   };
   app.post("/api/projects/:enc/runs/:runId/reject", (req, reply) => command("CHECKPOINT_REJECTED", req, reply));

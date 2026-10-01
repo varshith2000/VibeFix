@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { GitTool } from "@vibefix/adapters";
-import { worktreesDir } from "../store/paths.js";
+import { atomicWrite } from "../store/evidence-store.js";
+import { projectDir, worktreesDir } from "../store/paths.js";
 import { debug, info, warn, error } from "../util/logger.js";
 
 export interface WorktreeHandle {
@@ -27,6 +28,28 @@ export class WorktreeManager {
   /** Worktrees live in the central workspace, never inside the target repo. */
   private get worktreesRoot(): string {
     return worktreesDir(this.repoPath);
+  }
+
+  private get landingJournal(): string {
+    return path.join(projectDir(this.repoPath), "landing-journal.json");
+  }
+
+  /** Repair a cherry-pick interrupted by process termination before opening a project. */
+  static async recoverLanding(repoPath: string): Promise<void> {
+    const journal = path.join(projectDir(repoPath), "landing-journal.json");
+    let raw: string;
+    try {
+      raw = await fs.readFile(journal, "utf8");
+      JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const git = new GitTool(repoPath);
+    if (await git.cherryPickInProgress()) {
+      const abort = await git.cherryPickAbort();
+      if (abort.code !== 0) throw new Error(`interrupted cherry-pick could not be aborted: ${abort.stderr || abort.stdout}`);
+    }
+    await fs.rm(journal, { force: true });
   }
 
   async create(proposalId: string, attempt: number): Promise<WorktreeHandle> {
@@ -91,12 +114,17 @@ export class WorktreeManager {
       warn("worktree", `Refusing to land ${handle.proposalId}: user branch moved from ${handle.baseCommit} to ${currentHead}`);
       return { ok: false, conflict: true };
     }
+    await atomicWrite(this.landingJournal, JSON.stringify({ proposalId: handle.proposalId, ref, baseCommit: handle.baseCommit, startedAt: new Date().toISOString() }));
     const pick = await this.git.cherryPick(ref);
-    if (pick.code === 0) return { ok: true, conflict: false };
+    if (pick.code === 0) {
+      await fs.rm(this.landingJournal, { force: true });
+      return { ok: true, conflict: false };
+    }
     const abort = await this.git.cherryPickAbort();
     if (abort.code !== 0) {
       throw new Error(`cherry-pick failed and abort could not restore the user branch: ${abort.stderr || abort.stdout}`);
     }
+    await fs.rm(this.landingJournal, { force: true });
     return { ok: false, conflict: true };
   }
 

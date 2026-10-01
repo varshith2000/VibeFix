@@ -13,7 +13,10 @@ export function registerArtifactRoutes(app: FastifyInstance, context: ServerCont
     const store = scope.runtime?.store ?? (scope.runDir ? context.diskEvidence(scope.runDir) : null);
     if (!store) return reply.code(404).send({ error: "unknown run" });
     const backlog = await store.latest("backlog");
-    if (!backlog) return { proposals: [], unaddressedFindings: [] };
+    if (!backlog) {
+      if (store.degraded) return reply.code(500).send({ error: "evidence degraded", degraded: true, corruptArtifacts: store.corruptArtifacts });
+      return { proposals: [], unaddressedFindings: [] };
+    }
     try { return BacklogArtifactSchema.parse(backlog.data); }
     catch (err) { return reply.code(500).send({ error: String(err) }); }
   });
@@ -35,7 +38,10 @@ export function registerArtifactRoutes(app: FastifyInstance, context: ServerCont
     const store = scope.runtime?.store ?? (scope.runDir ? context.diskEvidence(scope.runDir) : null);
     if (!store) return reply.code(404).send({ error: "unknown run" });
     const report = await store.latest("report");
-    if (!report) return reply.code(404).send({ error: "report not ready" });
+    if (!report) {
+      if (store.degraded) return reply.code(500).send({ error: "evidence degraded", degraded: true, corruptArtifacts: store.corruptArtifacts });
+      return reply.code(404).send({ error: "report not ready" });
+    }
     return ReportArtifactSchema.parse(report.data);
   });
 }

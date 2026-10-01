@@ -47,6 +47,7 @@ export interface RunPaths {
   reportJsonFile: string;
   configFile: string;
   worktreesDir: string;
+  lockFile: string;
 }
 
 export function runsDir(repoPath: string): string {
@@ -79,5 +80,6 @@ export function runPaths(repoPath: string, id: string): RunPaths {
     reportJsonFile: path.join(runDir, "report.json"),
     configFile: path.join(dir, "config.json"),
     worktreesDir: path.join(dir, "worktrees"),
+    lockFile: path.join(runDir, ".run.lock"),
   };
 }

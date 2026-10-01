@@ -25,7 +25,11 @@ export interface EvidenceWriter {
 }
 
 export class EvidenceStore implements EvidenceReader, EvidenceWriter {
+  private corruptionCount = 0;
   constructor(private readonly paths: RunPaths) {}
+
+  get degraded(): boolean { return this.corruptionCount > 0; }
+  get corruptArtifacts(): number { return this.corruptionCount; }
 
   private producerDir(producer: string): string {
     return path.join(this.paths.evidenceDir, producer);
@@ -100,6 +104,7 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
           if (!kind || artifact.kind === kind) out.push(artifact);
         } catch (err) {
           // Corrupt artifact: surface as unknowns rather than crashing a run.
+          this.corruptionCount += 1;
           out.push({
             artifactId: file.replace(/\.json$/, ""),
             kind: "report",
@@ -121,7 +126,11 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
         await fs.readFile(path.join(this.paths.evidenceDir, `latest-${kind}.json`), "utf8"),
       );
       return decodeArtifact(raw);
-    } catch {
+    } catch (err) {
+      if ((await fs.stat(path.join(this.paths.evidenceDir, `latest-${kind}.json`)).then(() => true).catch(() => false))) {
+        this.corruptionCount += 1;
+        console.error(`[VibeFix] Corrupt latest evidence pointer for ${kind}:`, err);
+      }
       return null;
     }
   }
@@ -130,12 +139,16 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
     const dirs = await fs.readdir(this.paths.evidenceDir, { withFileTypes: true }).catch(() => []);
     for (const entry of dirs) {
       if (!entry.isDirectory()) continue;
+      const file = path.join(this.paths.evidenceDir, entry.name, `${artifactId}.json`);
       try {
         const raw = JSON.parse(
-          await fs.readFile(path.join(this.paths.evidenceDir, entry.name, `${artifactId}.json`), "utf8"),
+          await fs.readFile(file, "utf8"),
         );
         return decodeArtifact(raw);
-      } catch {
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        this.corruptionCount += 1;
+        console.error(`[VibeFix] Corrupt evidence artifact ${artifactId}:`, err);
         continue;
       }
     }

@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { AgentExecutionEvent } from "@vibefix/schemas";
-import { EvidenceStore, runPaths, type OrchestratorRuntime } from "@vibefix/core";
+import { EvidenceStore, atomicWrite, runPaths, type OrchestratorRuntime } from "@vibefix/core";
 import { decodePath, ProjectRegistry } from "./projects.js";
 import { isValidRunId, RateLimiter } from "./policies/resource-policy.js";
 
@@ -45,8 +45,8 @@ export interface ServerContext {
   diskState(runDir: string): Promise<DiskStateResult | { ok: false; reason: string } | null>;
   diskEvidence(runDir: string): EvidenceStore;
   idempotencyKey(runId: string, req: FastifyRequest): string | null;
-  cachedIdempotency(key: string | null): { status: number; body: unknown } | undefined;
-  rememberIdempotency(key: string | null, status: number, body: unknown): void;
+  cachedIdempotency(key: string | null): Promise<{ status: number; body: unknown } | undefined>;
+  rememberIdempotency(key: string | null, status: number, body: unknown): Promise<void>;
 }
 
 export function createServerContext(
@@ -63,6 +63,19 @@ export function createServerContext(
   const cloneLimiter = new RateLimiter(60_000, security.clonesPerMinute ?? 10);
   let activeClones = 0;
   const idempotencyCache = new Map<string, { status: number; body: unknown }>();
+  let idempotencyLoaded = false;
+  const idempotencyFile = path.join(process.env.VIBEFIX_HOME ?? path.join(process.env.USERPROFILE ?? process.env.HOME ?? ".", ".vibefix"), "idempotency.json");
+  const loadIdempotency = async () => {
+    if (idempotencyLoaded) return;
+    idempotencyLoaded = true;
+    try {
+      const parsed = JSON.parse(await fs.readFile(idempotencyFile, "utf8")) as Record<string, { status: number; body: unknown }>;
+      for (const [key, value] of Object.entries(parsed)) if (value && typeof value.status === "number") idempotencyCache.set(key, value);
+    } catch { /* first process / absent file */ }
+  };
+  const persistIdempotency = async () => {
+    await atomicWrite(idempotencyFile, JSON.stringify(Object.fromEntries(idempotencyCache), null, 2));
+  };
 
   const decodeProject = (enc: string, reply: FastifyReply): string | null => {
     const repoPath = decodePath(enc);
@@ -142,19 +155,25 @@ export function createServerContext(
     diskState,
     diskEvidence: (runDir) => new EvidenceStore({ evidenceDir: path.join(runDir, "evidence") } as never),
     idempotencyKey: (runId, req) => {
+      const project = (req.params as { enc?: string } | undefined)?.enc ?? "unknown-project";
       const header = req.headers["idempotency-key"];
-      if (typeof header === "string" && header.trim()) return `${runId}:${header.trim()}`;
+      if (typeof header === "string" && header.trim()) return `${project}:${runId}:${header.trim()}`;
       const bodyKey = (req.body as { idempotencyKey?: unknown } | undefined)?.idempotencyKey;
-      return typeof bodyKey === "string" && bodyKey.trim() ? `${runId}:${bodyKey.trim()}` : null;
+      return typeof bodyKey === "string" && bodyKey.trim() ? `${project}:${runId}:${bodyKey.trim()}` : null;
     },
-    cachedIdempotency: (key) => key ? idempotencyCache.get(key) : undefined,
-    rememberIdempotency: (key, status, body) => {
+    cachedIdempotency: async (key) => {
+      await loadIdempotency();
+      return key ? idempotencyCache.get(key) : undefined;
+    },
+    rememberIdempotency: async (key, status, body) => {
       if (!key) return;
+      await loadIdempotency();
       if (idempotencyCache.size >= 500) {
         const oldest = idempotencyCache.keys().next().value;
         if (oldest !== undefined) idempotencyCache.delete(oldest);
       }
       idempotencyCache.set(key, { status, body });
+      await persistIdempotency();
     },
   };
 }

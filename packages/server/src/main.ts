@@ -27,9 +27,20 @@ export async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[vibefix] ${signal} received; draining requests and runs before shutdown`);
+    const timeoutMs = Number(process.env.VIBEFIX_SHUTDOWN_TIMEOUT_MS ?? 10_000);
+    const timeout = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        console.error(`[vibefix] graceful shutdown exceeded ${timeoutMs}ms`);
+        process.exitCode = 1;
+        resolve();
+      }, timeoutMs);
+      timer.unref();
+    });
     try {
-      await app.close();
-      await registry.shutdown();
+      await Promise.race([(async () => {
+        await app.close();
+        await registry.shutdown();
+      })(), timeout]);
     } catch (err) {
       console.error(`[vibefix] graceful shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;

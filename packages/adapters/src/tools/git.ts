@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { access } from "node:fs/promises";
 import path from "node:path";
 import type { CommandRunner, ProcessResult } from "../capabilities.js";
 
@@ -23,7 +24,16 @@ export async function runCommand(
   let settled = false;
 
   const timer = setTimeout(() => {
-    if (!settled) child.kill("SIGKILL");
+    if (!settled) {
+      if (process.platform === "win32" && child.pid) {
+        // `npm.cmd`/`pnpm.cmd` are shell shims; killing only the parent can
+        // orphan the actual repository test process. Kill the full tree.
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+        killer.unref();
+      } else {
+        child.kill("SIGKILL");
+      }
+    }
   }, options.timeoutMs ?? 60_000);
 
   child.stdout?.on("data", (d: Buffer) => {
@@ -219,5 +229,19 @@ export class GitTool {
 
   async cherryPickAbort(): Promise<ProcessResult> {
     return this.git(["cherry-pick", "--abort"]);
+  }
+
+  async cherryPickInProgress(): Promise<boolean> {
+    const location = await this.git(["rev-parse", "--git-path", "CHERRY_PICK_HEAD"]);
+    if (location.code !== 0) return false;
+    const marker = path.isAbsolute(location.stdout.trim())
+      ? location.stdout.trim()
+      : path.join(this.root, location.stdout.trim());
+    try {
+      await access(marker);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

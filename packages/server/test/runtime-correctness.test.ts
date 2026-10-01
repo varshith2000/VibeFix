@@ -157,6 +157,30 @@ describe("idempotency keys (approve / abort / resume)", () => {
     expect(second.headers["x-idempotent-replay"]).toBe("true");
     expect((rt as never as { __dispatchCalls: unknown[] }).__dispatchCalls.filter((c) => c.type === "ABORT")).toHaveLength(1);
   });
+
+  it("replays an idempotent response after the server context is rebuilt", async () => {
+    const repo = path.join(home, "repo-restart");
+    const runId = "run_idemrestart1";
+    const url = `/api/projects/${b64(repo)}/runs/${runId}/approve`;
+    const headers = { ...auth, "content-type": "application/json", "idempotency-key": "restart-key" };
+    const firstRuntime = fakeRuntime({ runId, repoPath: repo });
+    registry.registerRuntime(firstRuntime, repo);
+
+    const first = await app.inject({ method: "POST", url, headers, payload: {} });
+    expect(first.statusCode).toBe(200);
+    await app.close();
+
+    registry = new ProjectRegistry();
+    app = await buildApp(registry, { security: { token: TOKEN } });
+    await app.ready();
+    const secondRuntime = fakeRuntime({ runId, repoPath: repo });
+    registry.registerRuntime(secondRuntime, repo);
+
+    const replay = await app.inject({ method: "POST", url, headers, payload: {} });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.headers["x-idempotent-replay"]).toBe("true");
+    expect((secondRuntime as never as { __dispatchCalls: unknown[] }).__dispatchCalls).toHaveLength(0);
+  });
 });
 
 describe("background failures are persisted, not swallowed", () => {

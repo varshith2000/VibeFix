@@ -20,6 +20,7 @@ import type { AgentExecutorPort, AgentExecutionInput, AgentExecutionOutcome } fr
 import type { RunEvent } from "@vibefix/domain";
 import type { WorktreeManager, WorktreeHandle } from "../worktree/worktree-manager.js";
 import { ChangeFirewall } from "../worktree/firewall.js";
+import type { RunLock } from "../store/run-lock.js";
 import { debug, info, warn, error } from "../util/logger.js";
 
 const POOL_CONCURRENCY = 3;
@@ -46,6 +47,7 @@ export class OrchestratorRuntime {
       budgets: Budgets;
       /** Config-level do-not-touch globs merged with Risk Assessor zones. */
       protectedPaths?: string[];
+      lock?: RunLock;
     },
     initialState: RunState,
   ) {
@@ -106,7 +108,11 @@ export class OrchestratorRuntime {
     );
     return locked.then((effects) => {
       debug("orchestrator", `Performing ${effects.length} effects for event ${eventId}`);
-      return this.performEffects(effects);
+      return this.performEffects(effects).finally(async () => {
+        if (this.state.status === "completed" || this.state.status === "aborted" || this.state.status === "failed") {
+          await this.deps.lock?.release();
+        }
+      });
     });
   }
 
@@ -585,6 +591,11 @@ export class OrchestratorRuntime {
     const s = this.state;
     if (s.status === "awaitingApproval" || s.status === "completed" || s.status === "aborted" || s.status === "failed") {
       return; // waiting on user, or terminal
+    }
+    if (s.status === "interrupted") {
+      this.state.status = "running";
+      this.state.error = null;
+      await this.persist();
     }
     await this.deps.worktrees.cleanupAll().catch(() => undefined);
     switch (s.phase) {

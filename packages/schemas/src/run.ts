@@ -34,6 +34,7 @@ export const RUN_PHASES: readonly RunPhase[] = [
 
 export const RunStatusSchema = z.enum([
   "running",
+  "interrupted",
   "paused",
   "awaitingApproval",
   "aborted",

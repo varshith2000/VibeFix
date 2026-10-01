@@ -2,17 +2,18 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { GitTool } from "@vibefix/adapters";
 import type { Budgets, RepoConfig, RefactoringMode, RunState } from "@vibefix/schemas";
-import { DEFAULT_MODEL_ROUTING, RepoConfigSchema } from "@vibefix/schemas";
+import { DEFAULT_MODEL_ROUTING, RepoConfigSchema, RunStateSchema } from "@vibefix/schemas";
 import { BudgetMeter } from "../budget.js";
 import { runId } from "../util/ids.js";
 import { EventLog } from "../store/event-log.js";
-import { EvidenceStore } from "../store/evidence-store.js";
+import { EvidenceStore, atomicWrite } from "../store/evidence-store.js";
 import { configPath, runPaths, runsDir } from "../store/paths.js";
 import type { AgentExecutorPort } from "./ports.js";
 import { OrchestratorRuntime } from "./runtime.js";
 import { createInitialRunState } from "@vibefix/domain";
 import { WorktreeManager } from "../worktree/worktree-manager.js";
 import { debug, info, warn, error } from "../util/logger.js";
+import { RunLock } from "../store/run-lock.js";
 
 /** Per-run services the executor factory binds into agent contexts. */
 export interface RunServices {
@@ -73,6 +74,7 @@ export class RunManager {
         );
       }
     }
+    await WorktreeManager.recoverLanding(absolute);
     
     const config = options?.config ?? (await loadRepoConfig(absolute));
     info("run-manager", `Successfully opened project at ${absolute}`);
@@ -150,12 +152,15 @@ export class RunManager {
     
     const agentIds = probe.definitions().map((d) => d.agentId);
     const state = createInitialRunState({ runId: id, repoPath: this.repoPath, mode, agentIds });
-    const runtime = this.buildRuntime(id, state);
+    const lock = new RunLock(paths.lockFile);
+    await lock.acquire();
+    const runtime = this.buildRuntime(id, state, lock);
     
     try {
-      await fs.writeFile(paths.stateFile, JSON.stringify(state, null, 2), "utf8");
+      await atomicWrite(paths.stateFile, JSON.stringify(state, null, 2));
       debug("run-manager", `Successfully persisted initial state for run ${id}`);
     } catch (err) {
+      await lock.release();
       error("run-manager", `Failed to persist initial state for run ${id}:`, err);
       throw err;
     }
@@ -175,12 +180,25 @@ export class RunManager {
       throw new Error(`Failed to load run ${runId}: state file corrupted or missing`);
     }
     
-    const state = raw as RunState;
+    const parsed = RunStateSchema.safeParse(raw);
+    if (!parsed.success) throw new Error(`Failed to load run ${runId}: invalid persisted state`);
+    const state: RunState = parsed.data;
+    const wasInterrupted = state.status === "running";
+    const needsWriterLock = wasInterrupted || state.status === "paused";
+    const lock = new RunLock(paths.lockFile);
+    if (needsWriterLock) {
+      await lock.acquire();
+    }
+    if (wasInterrupted) {
+      state.status = "interrupted";
+      state.error = "process restart interrupted this run; explicit resume is required";
+      await atomicWrite(paths.stateFile, JSON.stringify(state, null, 2));
+    }
     
     // Heal stale "running" states: nothing executes while paused or terminal,
     // so any agent still marked running was orphaned by a crash/restart.
     let healedAgents = 0;
-    if (state.status !== "running" && state.status !== "paused") {
+    if (!wasInterrupted && state.status !== "running" && state.status !== "paused") {
       for (const [id, s] of Object.entries(state.agentStates)) {
         if (s === "running") {
           state.agentStates[id] = "failed";
@@ -191,14 +209,15 @@ export class RunManager {
     }
     
     if (healedAgents > 0) {
+      await atomicWrite(paths.stateFile, JSON.stringify(state, null, 2));
       info("run-manager", `Healed ${healedAgents} stale agent states for run ${runId}`);
     }
     
     debug("run-manager", `Successfully loaded run ${runId} in phase ${state.phase}, status ${state.status}`);
-    return this.buildRuntime(runId, state);
+    return this.buildRuntime(runId, state, needsWriterLock ? lock : undefined);
   }
 
-  private buildRuntime(runId: string, state: RunState): OrchestratorRuntime {
+  private buildRuntime(runId: string, state: RunState, lock?: RunLock): OrchestratorRuntime {
     const paths = runPaths(this.repoPath, runId);
     const store = new EvidenceStore(paths);
     const events = new EventLog(paths);
@@ -226,6 +245,7 @@ export class RunManager {
         meter,
         budgets,
         protectedPaths: this.config.protectedPaths ?? [],
+        lock,
       },
       state,
     );

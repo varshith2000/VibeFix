@@ -13,7 +13,7 @@ export function registerFindingRoutes(app: FastifyInstance, context: ServerConte
     for (const artifact of await store.list(undefined, "findings")) {
       try { findings.push(...FindingsArtifactSchema.parse(artifact.data).findings); } catch { /* skip invalid artifact */ }
     }
-    return { findings };
+    return { findings, replayDegraded: store.degraded, corruptArtifactCount: store.corruptArtifacts };
   });
 
   app.get("/api/projects/:enc/runs/:runId/intelligence", async (req, reply) => {
@@ -46,6 +46,8 @@ export function registerFindingRoutes(app: FastifyInstance, context: ServerConte
       intent: intentArt ? ProductIntentSchema.safeParse(intentArt.data).data ?? null : null,
       survey: survey?.success ? survey.data : null,
       findingCounts: { total: findings.length, byCategory: byCat, byBand },
+      replayDegraded: store.degraded,
+      corruptArtifactCount: store.corruptArtifacts,
       health: {
         architecture: clamp(100 - (byCat.architecture ?? 0) * 8 - pressure * 0.3),
         maintainability: clamp(100 - (byCat.smell ?? 0) * 5 - (byCat.consistency ?? 0) * 6),
