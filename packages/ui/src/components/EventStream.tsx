@@ -101,7 +101,7 @@ export function EventStream({
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden rounded-lg border border-slate-800 bg-ink-900"
+      className="relative flex h-full flex-col overflow-hidden bg-transparent"
       style={{ width }}
     >
       {/* Resize handle — drag the edge to widen/shrink the stream. */}

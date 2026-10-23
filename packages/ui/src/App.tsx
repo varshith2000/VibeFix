@@ -242,14 +242,15 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
   const recents = loadRecents().filter((r) => r !== (open.variables ?? ""));
 
   return (
-    <div className="relative mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-5 px-6 py-10">
+    <div className="relative mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-5 px-6 py-10">
       <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
         <div className="absolute -left-24 top-10 h-72 w-72 rounded-full bg-sky-600/10 blur-3xl" />
         <div className="absolute -right-16 bottom-20 h-64 w-64 rounded-full bg-emerald-500/10 blur-3xl" />
       </div>
       <div>
-        <h1 className="font-display text-4xl tracking-tight text-slate-100">
-          Vibe<span className="text-sky-400">Fix</span>
+        <div className="eyebrow mb-3">The safe way to improve a vibe-coded repo</div>
+        <h1 className="font-display text-5xl tracking-tight text-slate-100 sm:text-6xl">
+          Vibe<span className="text-sky-400">Fix</span><span className="text-slate-600"> / </span><span className="text-slate-400">control room</span>
         </h1>
         <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-400">
           Software-engineering control plane for vibe-coded repos.
@@ -258,7 +259,7 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
         </p>
       </div>
 
-      <div className="rounded-xl border border-slate-800 bg-ink-900 p-5">
+      <div className="glass-card rounded-2xl p-5 sm:p-6">
         <div className="mb-4 flex gap-1 rounded border border-slate-800 bg-ink-950 p-1">
           {(["local", "github"] as const).map((t) => (
             <button
@@ -566,12 +567,13 @@ function RunScreen({
   const actionNeeded = phase === "awaitingApproval" && status === "awaitingApproval";
 
   return (
-    <div className="flex h-screen flex-col">
-      <header className="flex items-center justify-between border-b border-slate-800 bg-ink-900 px-4 py-2">
+    <div className="app-shell flex h-screen flex-col">
+      <header className="app-topbar flex items-center justify-between border-b border-slate-800/80 px-5 py-3">
         <div className="flex items-center gap-3">
-          <span className="text-sm font-bold">
+          <span className="font-display text-base font-bold tracking-tight">
             Vibe<span className="text-sky-400">Fix</span>
           </span>
+          <span className="hidden text-[10px] uppercase tracking-[.2em] text-slate-600 sm:inline">refactor control plane</span>
           <code className="max-w-[280px] truncate rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-400" title={repoPath}>
             {repoPath}
           </code>
@@ -627,14 +629,16 @@ function RunScreen({
 
       <div className="flex flex-1 overflow-hidden">
         {/* Organized step navigation */}
-        <nav className="flex w-44 shrink-0 flex-col border-r border-slate-800 bg-ink-900 p-2">
+        <nav className="app-sidebar flex w-52 shrink-0 flex-col border-r border-slate-800/80 p-3">
+          <div className="eyebrow mb-3 px-3">Workspace</div>
           {NAV.map((item) => {
             const highlight = actionNeeded && item.id === "checkpoint";
             return (
               <button
                 key={item.id}
                 onClick={() => setView(item.id)}
-                className={`rounded px-3 py-1.5 text-left text-xs ${
+                data-active={activeView === item.id}
+                className={`nav-item rounded-lg px-3 py-2 text-left text-xs ${
                   activeView === item.id
                     ? "bg-sky-800 text-white"
                     : highlight
@@ -659,9 +663,13 @@ function RunScreen({
         >
           <div className="min-h-0 overflow-hidden">
             {activeView === "overview" && (
-              <div className="flex h-full flex-col overflow-hidden rounded-lg border border-slate-800 bg-ink-900">
-                <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Agent orchestration — click any agent for details
+              <div className="workspace-panel flex h-full flex-col overflow-hidden rounded-2xl border border-slate-700/60">
+                <div className="flex items-center justify-between border-b border-slate-800/80 px-5 py-3">
+                  <div>
+                    <div className="eyebrow">Live workspace</div>
+                    <div className="mt-1 text-sm font-medium text-slate-200">Agent orchestration</div>
+                  </div>
+                  <span className="hidden text-[10px] text-slate-500 sm:inline">select an agent to inspect its evidence</span>
                 </div>
                 <div className="relative h-[calc(100%-33px)]">
                   {agents ? (
@@ -715,7 +723,9 @@ function RunScreen({
               <SettingsPanel repoPath={repoPath} agents={agents} onClose={() => setView("overview")} />
             )}
           </div>
-          <EventStream width={streamWidth} onWidthChange={setStreamWidth} />
+          <div className="event-pane overflow-hidden rounded-2xl border border-slate-700/60">
+            <EventStream width={streamWidth} onWidthChange={setStreamWidth} />
+          </div>
         </main>
       </div>
     </div>

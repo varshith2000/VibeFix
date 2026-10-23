@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VibeFix — guided demo</title>
+  <style>
+    :root { color-scheme: dark; --bg:#071018; --panel:#0d1d28; --line:#203848; --text:#dbe7f2; --muted:#7892a5; --cyan:#38bdf8; --green:#34d399; --violet:#a78bfa; }
+    * { box-sizing:border-box; } body { margin:0; min-height:100vh; font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif; color:var(--text); background:radial-gradient(circle at 10% 0%,#12394c 0,transparent 35%),var(--bg); }
+    .shell { max-width:1180px; margin:auto; padding:32px 22px 70px; } .top { display:flex; justify-content:space-between; gap:24px; align-items:center; border-bottom:1px solid var(--line); padding-bottom:20px; }
+    .brand { font-size:20px; font-weight:800; letter-spacing:-.04em; } .brand b { color:var(--cyan); } .eyebrow { color:var(--muted); text-transform:uppercase; letter-spacing:.16em; font-size:10px; font-weight:800; }
+    h1 { max-width:720px; font-size:clamp(38px,6vw,72px); line-height:.98; letter-spacing:-.065em; margin:68px 0 18px; } p { color:var(--muted); max-width:660px; }
+    .button { border:1px solid #2c627d; background:#0e3042; color:#e9f8ff; padding:11px 16px; border-radius:10px; font-weight:700; cursor:pointer; } .button:hover { background:#16475e; }
+    .grid { display:grid; grid-template-columns:1.4fr .8fr; gap:16px; margin-top:42px; } .card { border:1px solid var(--line); background:rgba(13,29,40,.86); border-radius:18px; padding:20px; box-shadow:0 20px 70px #0003; }
+    .pipeline { display:grid; gap:9px; margin-top:18px; } .step { display:flex; align-items:center; gap:12px; border:1px solid #1a3342; background:#0a1822; padding:13px; border-radius:12px; color:var(--muted); transition:.25s; } .step.active { border-color:var(--cyan); color:#e8f8ff; box-shadow:0 0 24px #38bdf81c; } .step.done { border-color:#17634e; color:#a7f3d0; }
+    .dot { width:10px; height:10px; border-radius:50%; background:#365365; flex:0 0 auto; } .active .dot { background:var(--cyan); box-shadow:0 0 15px var(--cyan); } .done .dot { background:var(--green); }
+    .metric { display:flex; justify-content:space-between; border-bottom:1px solid #1a3342; padding:12px 0; color:var(--muted); } .metric strong { color:var(--text); } .log { margin-top:18px; min-height:130px; background:#061018; border-radius:12px; padding:14px; font:12px/1.8 ui-monospace,monospace; color:#8cc9de; overflow:auto; }
+    .note { color:#a7f3d0; border-left:2px solid var(--green); padding-left:12px; margin-top:24px; } footer { margin-top:55px; color:#567184; font-size:12px; }
+    @media(max-width:760px){ .top{align-items:flex-start; flex-direction:column}.grid{grid-template-columns:1fr} h1{margin-top:45px} }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top"><div class="brand">Vibe<span><b>Fix</b></span></div><div class="eyebrow">guided product demo · no backend required</div></header>
+    <section><div class="eyebrow" style="margin-top:62px">A safer refactoring control plane</div><h1>See what happens before code changes land.</h1><p>VibeFix maps a repository, builds an evidence-backed change plan, pauses for your approval, then verifies the smallest safe diff in an isolated worktree.</p><button class="button" id="start">Start the walkthrough →</button><div class="note">Nothing changes until a human approves the checkpoint.</div></section>
+    <section class="grid"><div class="card"><div class="eyebrow">Pipeline playback</div><div class="pipeline" id="pipeline"></div></div><aside class="card"><div class="eyebrow">Run snapshot</div><div class="metric"><span>Project</span><strong>acme-dashboard</strong></div><div class="metric"><span>Files mapped</span><strong>248</strong></div><div class="metric"><span>Findings</span><strong>12</strong></div><div class="metric"><span>Risk score</span><strong style="color:#fbbf24">medium</strong></div><div class="metric"><span>Worktree</span><strong style="color:var(--green)">isolated</strong></div><div class="log" id="log">ready — press “Start the walkthrough”</div></aside></section>
+    <footer>Use the real app for live runs. This page is a deterministic, shareable explanation of the workflow for demos and onboarding.</footer>
+  </main>
+  <script>
+    const steps=[['Understand','Map files, languages, imports, and entry points.'],['Diagnose','Collect deterministic and model-assisted findings.'],['Assess risk','Score impact, confidence, and evidence quality.'],['Your approval','Review the proposed backlog before any edit.'],['Transform','Apply approved changes inside the firewalled worktree.'],['Verify & explain','Run checks, summarize the diff, and report limits.']];
+    const pipeline=document.querySelector('#pipeline'); const log=document.querySelector('#log'); let timer;
+    steps.forEach(([name,desc],i)=>{ const el=document.createElement('div'); el.className='step'; el.innerHTML='<span class="dot"></span><span><strong>'+name+'</strong><br><small>'+desc+'</small></span>'; el.dataset.index=i; pipeline.appendChild(el); });
+    document.querySelector('#start').onclick=()=>{ clearInterval(timer); let i=0; log.textContent='run created — preparing evidence…'; const tick=()=>{ document.querySelectorAll('.step').forEach((el,n)=>el.className='step '+(n<i?'done':n===i?'active':'')); log.textContent=['cartographer: repository map ready','smell-detector: 12 findings validated','risk-assessor: medium risk / 4 proposed changes','checkpoint: waiting for human approval','engineer: worktree changes applied','verifier: 18 checks passed · report ready'][i]; if(i<steps.length-1)i++;else clearInterval(timer); }; tick(); timer=setInterval(tick,1000); };
+  </script>
+</body>
+</html>
