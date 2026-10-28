@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
-export const PUBLIC_PATHS = new Set(["/api/health"]);
+export const PUBLIC_PATHS = new Set(["/api/health", "/api/ready"]);
 
 export function tokenFilePath(): string {
   return path.join(process.env.VIBEFIX_HOME ?? path.join(homedir(), ".vibefix"), "server-token");

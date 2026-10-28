@@ -48,6 +48,16 @@ export const BudgetsSchema = z.object({
   maxRetriesPerChange: z.number().int().nonnegative().default(2),
   /** Warn at this fraction of runMaxTokens. */
   warnFraction: z.number().min(0).max(1).default(0.8),
+  /** RES-04: Maximum duration for an analysis phase (ms). */
+  analysisTimeoutMs: z.number().int().positive().optional(),
+  /** RES-05: Maximum duration for an entire run (ms). */
+  runTimeoutMs: z.number().int().positive().optional(),
+  /** RES-10: Maximum LLM calls per run. */
+  maxLlmCallsPerRun: z.number().int().positive().optional(),
+  /** RES-13: Maximum estimated cost per run (USD). */
+  maxCostUsd: z.number().positive().optional(),
+  /** RES-14: Maximum concurrent worktrees per run. */
+  maxWorktreesPerRun: z.number().int().positive().optional(),
 });
 export type Budgets = z.infer<typeof BudgetsSchema>;
 
@@ -189,8 +199,14 @@ export const DEFAULT_MODEL_ROUTING: ModelRouting = {
   },
   budgets: {
     runMaxTokens: 2_000_000, // Reduced from 4M for better cost control
+    agentMaxTokens: 500_000,
     maxChangesPerRun: 10,
     maxRetriesPerChange: 2,
     warnFraction: 0.8,
+    analysisTimeoutMs: 600_000,
+    runTimeoutMs: 1_800_000,
+    maxLlmCallsPerRun: 120,
+    maxCostUsd: 10,
+    maxWorktreesPerRun: 8,
   },
 };

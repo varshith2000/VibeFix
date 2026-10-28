@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { GitTool } from "@vibefix/adapters";
 import type { Budgets, RepoConfig, RefactoringMode, RunState } from "@vibefix/schemas";
-import { DEFAULT_MODEL_ROUTING, RepoConfigSchema, RunStateSchema } from "@vibefix/schemas";
+import { DEFAULT_MODEL_ROUTING, RepoConfigSchema, RunStateSchema, migrateRunState } from "@vibefix/schemas";
 import { BudgetMeter } from "../budget.js";
 import { runId } from "../util/ids.js";
 import { EventLog } from "../store/event-log.js";
@@ -99,6 +99,11 @@ export class RunManager {
     this.config.routing.budgets.maxChangesPerRun = next.routing.budgets.maxChangesPerRun;
     this.config.routing.budgets.maxRetriesPerChange = next.routing.budgets.maxRetriesPerChange;
     this.config.routing.budgets.warnFraction = next.routing.budgets.warnFraction;
+    this.config.routing.budgets.analysisTimeoutMs = next.routing.budgets.analysisTimeoutMs;
+    this.config.routing.budgets.runTimeoutMs = next.routing.budgets.runTimeoutMs;
+    this.config.routing.budgets.maxLlmCallsPerRun = next.routing.budgets.maxLlmCallsPerRun;
+    this.config.routing.budgets.maxCostUsd = next.routing.budgets.maxCostUsd;
+    this.config.routing.budgets.maxWorktreesPerRun = next.routing.budgets.maxWorktreesPerRun;
     this.config.defaultMode = next.defaultMode;
     this.config.protectedPaths = next.protectedPaths;
     this.config.executionPolicy = next.executionPolicy;
@@ -180,9 +185,14 @@ export class RunManager {
       throw new Error(`Failed to load run ${runId}: state file corrupted or missing`);
     }
     
-    const parsed = RunStateSchema.safeParse(raw);
-    if (!parsed.success) throw new Error(`Failed to load run ${runId}: invalid persisted state`);
-    const state: RunState = parsed.data;
+    let state: RunState;
+    try {
+      state = migrateRunState(raw);
+    } catch (err) {
+      throw new Error(
+        `Failed to load run ${runId}: invalid persisted state (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
     const wasInterrupted = state.status === "running";
     const needsWriterLock = wasInterrupted || state.status === "paused";
     const lock = new RunLock(paths.lockFile);
@@ -241,7 +251,7 @@ export class RunManager {
         store,
         events,
         executor,
-        worktrees: new WorktreeManager(this.repoPath),
+        worktrees: new WorktreeManager(this.repoPath, budgets.maxWorktreesPerRun),
         meter,
         budgets,
         protectedPaths: this.config.protectedPaths ?? [],

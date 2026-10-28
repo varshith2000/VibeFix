@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -201,6 +201,18 @@ describe("filesystem path containment", () => {
     expect(res.statusCode, res.body).toBe(400);
   });
 
+  it("rejects symlink/junction escape out of the repository on file read (SEC-06)", async () => {
+    const linkDir = path.join(project, "linked-sibling");
+    await symlink(sibling, linkDir, process.platform === "win32" ? "junction" : "dir");
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/projects/${b64(project)}/file?path=${encodeURIComponent("linked-sibling/secret.txt")}`,
+      headers: auth,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.body).not.toContain("SECRET");
+  });
+
   it("isPathInside is a containment check, not a prefix check", () => {
     expect(isPathInside(project, path.join(project, "a.txt"))).toBe(true);
     expect(isPathInside(project, sibling)).toBe(false);
@@ -223,6 +235,32 @@ describe("filesystem browse roots", () => {
       expect(res.statusCode).toBe(403);
     } finally {
       await restricted.close();
+    }
+  });
+
+  it("rejects symlink/junction escape in /api/fs/browse (SEC-06, SEC-09)", async () => {
+    const allowedRoot = path.join(home, "browse-allowed");
+    const outsideDir = path.join(tmpdir(), `vibefix-outside-${Date.now()}`);
+    await mkdir(allowedRoot, { recursive: true });
+    await mkdir(outsideDir, { recursive: true });
+    const escapeLink = path.join(allowedRoot, "escape-link");
+    await symlink(outsideDir, escapeLink, process.platform === "win32" ? "junction" : "dir");
+
+    const restricted = await buildApp(new ProjectRegistry(), {
+      security: { token: TOKEN, allowedBrowseRoots: [allowedRoot] },
+    });
+    await restricted.ready();
+    try {
+      const res = await restricted.inject({
+        method: "GET",
+        url: `/api/fs/browse?path=${encodeURIComponent(escapeLink)}`,
+        headers: auth,
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().code).toBe("E_PATH_ESCAPE");
+    } finally {
+      await restricted.close();
+      await rm(outsideDir, { recursive: true, force: true });
     }
   });
 });
@@ -379,6 +417,120 @@ describe("run ceiling (resource limit)", () => {
     await limited.close();
     expect(res.statusCode).toBe(429);
     expect(res.json().error).toContain("run ceiling");
+  });
+});
+
+describe("resource limits & retention/deletion (RES-01, RES-15, DAT-05, DAT-06, SEC-13, AUD-01, AUD-02)", () => {
+  it("rejects opening a repository exceeding maxRepoBytes with 400 E_REPO_TOO_LARGE (RES-01)", async () => {
+    const bigRepo = path.join(home, "big-repo");
+    await mkdir(bigRepo, { recursive: true });
+    await writeFile(path.join(bigRepo, "large.bin"), "x".repeat(2048));
+
+    const limited = await buildApp(new ProjectRegistry(), {
+      security: { token: TOKEN, maxRepoBytes: 512 },
+    });
+    await limited.ready();
+    try {
+      const res = await limited.inject({
+        method: "POST",
+        url: "/api/projects",
+        headers: { ...auth, "content-type": "application/json" },
+        payload: { repoPath: bigRepo },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe("E_REPO_TOO_LARGE");
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("rejects starting a run or cloning when VIBEFIX_HOME exceeds maxDiskBytes with 507 E_DISK_BUDGET (RES-15)", async () => {
+    const repo = path.join(home, "disk-budget-repo");
+    await mkdir(repo, { recursive: true });
+    await writeFile(path.join(home, "filler.bin"), "y".repeat(2048));
+
+    const limited = await buildApp(new ProjectRegistry(), {
+      security: { token: TOKEN, maxDiskBytes: 512 },
+    });
+    await limited.ready();
+    try {
+      const runRes = await limited.inject({
+        method: "POST",
+        url: `/api/projects/${b64(repo)}/runs`,
+        headers: { ...auth, "content-type": "application/json" },
+        payload: { mode: "minimal" },
+      });
+      expect(runRes.statusCode).toBe(507);
+      expect(runRes.json().code).toBe("E_DISK_BUDGET");
+
+      const cloneRes = await limited.inject({
+        method: "POST",
+        url: "/api/projects/clone",
+        headers: { ...auth, "content-type": "application/json" },
+        payload: { url: "https://github.com/owner/repo" },
+      });
+      expect(cloneRes.statusCode).toBe(507);
+      expect(cloneRes.json().code).toBe("E_DISK_BUDGET");
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("sweeps older terminal runs beyond maxRunsPerProject and deletes runs/projects cleanly (DAT-05, DAT-06)", async () => {
+    const sweepRepo = path.join(home, "sweep-repo");
+    await mkdir(sweepRepo, { recursive: true });
+    for (let i = 1; i <= 4; i++) {
+      const rid = `run_sweep000000${i}`;
+      const rdir = runPaths(sweepRepo, rid).runDir;
+      await mkdir(rdir, { recursive: true });
+      await writeFile(
+        path.join(rdir, "state.json"),
+        JSON.stringify({ runId: rid, status: "completed", createdAt: `2026-01-0${i}T00:00:00.000Z` }),
+      );
+    }
+
+    const sweepApp = await buildApp(new ProjectRegistry(), {
+      security: { token: TOKEN, retentionMaxRuns: 2 },
+    });
+    await sweepApp.ready();
+    try {
+      const sweepRes = await sweepApp.inject({
+        method: "POST",
+        url: `/api/projects/${b64(sweepRepo)}/sweep`,
+        headers: auth,
+      });
+      expect(sweepRes.statusCode).toBe(200);
+      expect((sweepRes.json().removedRuns as string[]).slice().sort()).toEqual(["run_sweep0000001", "run_sweep0000002"]);
+
+      const delRunRes = await sweepApp.inject({
+        method: "DELETE",
+        url: `/api/projects/${b64(sweepRepo)}/runs/run_sweep0000003`,
+        headers: auth,
+      });
+      expect(delRunRes.statusCode).toBe(200);
+      expect(delRunRes.json().ok).toBe(true);
+
+      const delProjRes = await sweepApp.inject({
+        method: "DELETE",
+        url: `/api/projects/${b64(sweepRepo)}`,
+        headers: auth,
+      });
+      expect(delProjRes.statusCode).toBe(200);
+      expect(delProjRes.json().ok).toBe(true);
+
+      const auditRes = await sweepApp.inject({
+        method: "GET",
+        url: "/api/audit",
+        headers: auth,
+      });
+      expect(auditRes.statusCode).toBe(200);
+      const actions = (auditRes.json().entries as Array<{ action: string }>).map((e) => e.action);
+      expect(actions).toContain("retention.sweep");
+      expect(actions).toContain("run.delete");
+      expect(actions).toContain("project.delete");
+    } finally {
+      await sweepApp.close();
+    }
   });
 });
 

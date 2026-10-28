@@ -4,10 +4,10 @@ export function isLoopbackHost(host: string): boolean {
   return LOOPBACK_HOSTS.has(host.toLowerCase());
 }
 
-export function assertBindingAllowed(host: string): void {
+export function assertBindingAllowed(host: string, env: Record<string, string | undefined> = process.env): void {
   if (isLoopbackHost(host)) return;
-  const optedIn = process.env.VIBEFIX_ALLOW_REMOTE === "1";
-  const hasToken = (process.env.VIBEFIX_API_TOKEN ?? "").length >= 16;
+  const optedIn = env.VIBEFIX_ALLOW_REMOTE === "1";
+  const hasToken = (env.VIBEFIX_API_TOKEN ?? "").length >= 16;
   if (!optedIn || !hasToken) {
     throw new Error(
       `refusing to bind ${host}: VibeFix serves filesystem reads and code-modification ` +

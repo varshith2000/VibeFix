@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import {
   BacklogArtifactSchema,
   FindingsArtifactSchema,
   RiskAssessmentsArtifactSchema,
+  redactSecrets,
   type AgentDefinition,
   type Budgets,
   type ChangeLedgerEntry,
@@ -25,6 +27,22 @@ import { debug, info, warn, error } from "../util/logger.js";
 
 const POOL_CONCURRENCY = 3;
 
+/** SAFE-08: Deterministic SHA-256 fingerprint of an approved proposal's scope and constraints. */
+export function proposalScopeHash(
+  proposal: Pick<ChangeProposal, "proposalId" | "filesInScope" | "filesOutOfScope" | "constraints">,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        proposalId: proposal.proposalId,
+        filesInScope: [...proposal.filesInScope].sort(),
+        filesOutOfScope: [...proposal.filesOutOfScope].sort(),
+        constraints: [...proposal.constraints].sort(),
+      }),
+    )
+    .digest("hex");
+}
+
 /**
  * Executes reducer effects: runs agent pools, drives the execution loop
  * (worktree -> engineer -> verifier -> verdict), persists state atomically,
@@ -35,6 +53,7 @@ export class OrchestratorRuntime {
   private state: RunState;
   private readonly defs: AgentDefinition[];
   private backlog: ChangeProposal[] | null = null;
+  private readonly runStartedAt = Date.now();
 
   constructor(
     private readonly deps: {
@@ -53,6 +72,16 @@ export class OrchestratorRuntime {
   ) {
     this.state = initialState;
     this.defs = deps.executor.definitions();
+    if (typeof deps.meter?.onWarn === "function" && typeof deps.events?.append === "function") {
+      deps.meter.onWarn((snapshot) => {
+        void deps.events
+          .append(this.runId, "budget.warning", {
+            message: `token budget warning: ${snapshot.tokensSpent}/${snapshot.hardStop} tokens used`,
+            payload: snapshot,
+          })
+          .catch(() => undefined);
+      });
+    }
   }
 
   get runId(): string {
@@ -135,6 +164,21 @@ export class OrchestratorRuntime {
       { maxRetriesPerChange: this.deps.budgets.maxRetriesPerChange, maxChangesPerRun: this.deps.budgets.maxChangesPerRun },
     );
     this.state = state;
+    if (event.type === "CHECKPOINT_APPROVED" && typeof this.deps.store?.latest === "function") {
+      const backlogArt = await this.deps.store.latest("backlog").catch(() => null);
+      if (backlogArt) {
+        const parsed = BacklogArtifactSchema.safeParse(backlogArt.data);
+        if (parsed.success) {
+          const scopeHashes: Record<string, string> = {};
+          for (const p of parsed.data.proposals) {
+            if (this.state.approval.approvedItems.includes(p.proposalId)) {
+              scopeHashes[p.proposalId] = proposalScopeHash(p);
+            }
+          }
+          this.state.approval.scopeHashes = scopeHashes;
+        }
+      }
+    }
     this.state.budget.tokensSpent = this.deps.meter.tokens; // runtime-owned field
     try {
       await this.persist();
@@ -260,13 +304,25 @@ export class OrchestratorRuntime {
 
   private async runAgentGuarded(agentId: string, input: AgentExecutionInput): Promise<void> {
     const def = this.defById(agentId);
+    const timeoutError = this.checkTimeBudget(def.phase);
+    if (timeoutError) {
+      await this.dispatch({ type: "FATAL", message: timeoutError });
+      throw new Error(timeoutError);
+    }
     try {
       await this.dispatch({ type: "AGENT_STARTED", agentId });
       let outcome: AgentExecutionOutcome;
+      let timedOutMessage: string | null = null;
       try {
-        outcome = await this.deps.executor.execute(def, input);
+        outcome = await this.executeWithTimeBudget(def, input, (msg) => {
+          timedOutMessage = msg;
+        });
       } catch (err) {
         outcome = { outcome: "failed", artifactIds: [], error: String(err) };
+      }
+      if (timedOutMessage) {
+        await this.dispatch({ type: "FATAL", message: timedOutMessage });
+        throw new Error(timedOutMessage);
       }
       await this.dispatch({
         type: "AGENT_RESULT",
@@ -275,6 +331,9 @@ export class OrchestratorRuntime {
         artifactIds: outcome.artifactIds,
       });
     } catch (err) {
+      if (err instanceof Error && err.message.startsWith("E_TIME_BUDGET:")) {
+        throw err;
+      }
       // The dispatch machinery itself failed (persist I/O, etc). NEVER leave
       // the agent stuck "running": force a terminal state and tell the world
       // directly through the event log.
@@ -289,6 +348,70 @@ export class OrchestratorRuntime {
     }
   }
 
+  private checkTimeBudget(phase: AgentDefinition["phase"]): string | null {
+    const elapsed = Date.now() - this.runStartedAt;
+    if (this.deps.budgets.runTimeoutMs && elapsed >= this.deps.budgets.runTimeoutMs) {
+      return `E_TIME_BUDGET: run duration exceeded (${this.deps.budgets.runTimeoutMs}ms)`;
+    }
+    const isAnalysis =
+      phase === "recon" ||
+      phase === "diagnosis" ||
+      phase === "riskAssessment" ||
+      phase === "synthesis" ||
+      phase === "minimality";
+    if (isAnalysis && this.deps.budgets.analysisTimeoutMs && elapsed >= this.deps.budgets.analysisTimeoutMs) {
+      return `E_TIME_BUDGET: analysis duration exceeded (${this.deps.budgets.analysisTimeoutMs}ms)`;
+    }
+    return null;
+  }
+
+  private async executeWithTimeBudget(
+    def: AgentDefinition,
+    input: AgentExecutionInput,
+    onTimeout: (message: string) => void,
+  ): Promise<AgentExecutionOutcome> {
+    const isAnalysis =
+      def.phase === "recon" ||
+      def.phase === "diagnosis" ||
+      def.phase === "riskAssessment" ||
+      def.phase === "synthesis" ||
+      def.phase === "minimality";
+    const elapsed = Date.now() - this.runStartedAt;
+    const candidates: Array<{ ms: number; label: string }> = [];
+    if (this.deps.budgets.runTimeoutMs) {
+      candidates.push({
+        ms: Math.max(1, this.deps.budgets.runTimeoutMs - elapsed),
+        label: `E_TIME_BUDGET: run duration exceeded (${this.deps.budgets.runTimeoutMs}ms)`,
+      });
+    }
+    if (isAnalysis && this.deps.budgets.analysisTimeoutMs) {
+      candidates.push({
+        ms: Math.max(1, this.deps.budgets.analysisTimeoutMs - elapsed),
+        label: `E_TIME_BUDGET: analysis duration exceeded (${this.deps.budgets.analysisTimeoutMs}ms)`,
+      });
+    }
+    if (candidates.length === 0) {
+      return this.deps.executor.execute(def, input);
+    }
+    candidates.sort((a, b) => a.ms - b.ms);
+    const chosen = candidates[0]!;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.deps.executor.execute(def, input),
+        new Promise<AgentExecutionOutcome>((_, reject) => {
+          timer = setTimeout(() => {
+            onTimeout(chosen.label);
+            reject(new Error(chosen.label));
+          }, chosen.ms);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   /**
    * The transformation loop, one proposal at a time:
    * fresh worktree -> engineer (firewalled) -> commit -> verifier gates ->
@@ -298,6 +421,20 @@ export class OrchestratorRuntime {
     const proposal = await this.loadProposal(proposalId);
     if (!proposal) {
       await this.dispatch({ type: "FATAL", message: `proposal ${proposalId} not found in backlog` });
+      return;
+    }
+    const expectedHash = this.state.approval.scopeHashes?.[proposalId];
+    if (expectedHash && proposalScopeHash(proposal) !== expectedHash) {
+      const reason = `E_SCOPE_MUTATED: proposal ${proposalId} scope or constraints changed after approval`;
+      await this.appendLedger({
+        proposalId,
+        attempt,
+        handle: { proposalId, attempt, branch: `vibefix/${proposalId.toLowerCase()}`, path: "", baseCommit: null },
+        diff: "",
+        verdict: "rejected",
+        verifierNotes: [reason],
+      });
+      await this.dispatch({ type: "GATE_VERDICT", proposalId, verdict: "rejected", reason });
       return;
     }
     const engineer = this.defs.find((d) => d.permission === "worktree-write");
@@ -539,15 +676,16 @@ export class OrchestratorRuntime {
     verifierNotes: string[];
     committedRef?: string | null;
   }): Promise<void> {
+    const redactedDiff = redactSecrets(input.diff);
     const entry: ChangeLedgerEntry = {
       ledgerId: ledgerId(),
       proposalId: input.proposalId,
       attempt: input.attempt,
       worktreePath: input.handle.path,
       baseCommit: input.handle.baseCommit,
-      diff: input.diff.length > 200_000 ? `${input.diff.slice(0, 200_000)}\n... (truncated)` : input.diff,
+      diff: redactedDiff.length > 200_000 ? `${redactedDiff.slice(0, 200_000)}\n... (truncated)` : redactedDiff,
       verdict: input.verdict,
-      verifierNotes: input.verifierNotes,
+      verifierNotes: input.verifierNotes.map((n) => redactSecrets(n)),
       committedRef: input.committedRef ?? null,
       ts: new Date().toISOString(),
     };
@@ -568,6 +706,9 @@ export class OrchestratorRuntime {
   }
 
   private async persist(): Promise<void> {
+    if (this.state.error) {
+      this.state.error = redactSecrets(this.state.error);
+    }
     await atomicWrite(this.deps.paths.stateFile, JSON.stringify(this.state, null, 2));
   }
 

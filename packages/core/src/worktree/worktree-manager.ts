@@ -20,9 +20,11 @@ export interface WorktreeHandle {
  */
 export class WorktreeManager {
   private readonly git: GitTool;
+  private readonly maxWorktrees: number;
 
-  constructor(private readonly repoPath: string) {
+  constructor(private readonly repoPath: string, maxWorktrees = Number(process.env.VIBEFIX_MAX_WORKTREES ?? 8)) {
     this.git = new GitTool(repoPath);
+    this.maxWorktrees = maxWorktrees;
   }
 
   /** Worktrees live in the central workspace, never inside the target repo. */
@@ -63,6 +65,10 @@ export class WorktreeManager {
       const baseCommit = await this.git.headCommit();
       if (!baseCommit) throw new Error("cannot create a worktree without a base commit");
       await fs.mkdir(path.dirname(wtPath), { recursive: true });
+      const activeEntries = await fs.readdir(this.worktreesRoot).catch(() => [] as string[]);
+      if (activeEntries.length >= this.maxWorktrees && !activeEntries.includes(slug)) {
+        throw new Error(`E_WORKTREE_LIMIT: maximum active worktrees (${this.maxWorktrees}) reached`);
+      }
       const res = await this.git.addWorktree(wtPath, branch);
       if (res.code !== 0) {
         error("worktree", `Worktree add failed for ${slug}: ${res.stderr}\n${res.stdout}`);
@@ -131,6 +137,15 @@ export class WorktreeManager {
   async discard(handle: WorktreeHandle): Promise<void> {
     await this.git.removeWorktree(handle.path, true).catch(() => undefined);
     await this.git.deleteBranch(handle.branch, true).catch(() => undefined);
+    const stillExists = await fs.stat(handle.path).then(() => true).catch(() => false);
+    if (stillExists) {
+      await fs.rm(handle.path, { recursive: true, force: true }).catch(() => undefined);
+      await this.git.removeWorktree(handle.path, true).catch(() => undefined);
+      const remains = await fs.stat(handle.path).then(() => true).catch(() => false);
+      if (remains) {
+        throw new Error(`E_DISCARD_FAILED: could not remove worktree at ${handle.path}`);
+      }
+    }
   }
 
   /** Best-effort cleanup of all vibefix worktrees (abort, CLI clean, exit). */

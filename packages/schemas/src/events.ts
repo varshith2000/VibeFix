@@ -38,6 +38,7 @@ export const AgentExecutionEventSchema = z.object({
   proposalId: z.string().optional(),
   message: z.string().optional(),
   payload: z.unknown().optional(),
+  schemaVersion: z.literal(1).default(1),
 });
 export type AgentExecutionEvent = z.infer<typeof AgentExecutionEventSchema>;
 

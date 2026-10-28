@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import type { FindingsArtifact } from "@vibefix/schemas";
 import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
 import { definitionFor } from "../definitions.js";
@@ -53,15 +51,19 @@ export class SecurityAgent implements VibeFixAgent {
         },
       ];
 
+      const skippedOversized: string[] = [];
       for (const f of files.slice(0, 600)) {
         let content: string;
         try {
-          content = await fs.readFile(path.join(ctx.repoPath, ...f.path.split("/")), "utf8");
+          content = await ctx.tools.fs.readFile(ctx.repoPath, f.path);
         } catch {
           continue;
         }
-        // Skip obvious false positives in lockfiles / huge JSON.
-        if (content.length > 200_000) continue;
+        // RES-03: Skip huge files with explicit degraded disclosure.
+        if (content.length > 200_000) {
+          skippedOversized.push(`${f.path} (${content.length} chars > 200000 cap)`);
+          continue;
+        }
 
         for (const pat of SECRET_PATTERNS) {
           pat.re.lastIndex = 0;
@@ -100,13 +102,18 @@ export class SecurityAgent implements VibeFixAgent {
 
       // Cap noise — security scan can be chatty on large repos.
       const capped = findings.slice(0, 40);
+      const notes = [
+        "security-agent",
+        "security findings are informational — not auto-fixed in minimal mode",
+        ...(skippedOversized.length > 0 ? [`degraded: skipped ${skippedOversized.length} oversized file(s): ${skippedOversized.join(", ")}`] : []),
+      ];
       const artifact = await ctx.store.write({
         kind: "findings",
         producer: ctx.def.agentId,
         runId: ctx.runState.runId,
         data: {
           findings: capped,
-          notes: ["security-agent", "security findings are informational — not auto-fixed in minimal mode"],
+          notes,
         } satisfies FindingsArtifact,
       });
       await ctx.progress(`${capped.length} security findings`);

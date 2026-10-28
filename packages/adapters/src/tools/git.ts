@@ -22,9 +22,13 @@ export async function runCommand(
   let stdout = "";
   let stderr = "";
   let settled = false;
+  let timedOut = false;
 
   const timer = setTimeout(() => {
     if (!settled) {
+      timedOut = true;
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       if (process.platform === "win32" && child.pid) {
         // `npm.cmd`/`pnpm.cmd` are shell shims; killing only the parent can
         // orphan the actual repository test process. Kill the full tree.
@@ -55,6 +59,13 @@ export async function runCommand(
   });
   settled = true;
   clearTimeout(timer);
+  if (timedOut) {
+    return {
+      code: -1,
+      stdout,
+      stderr: `${stderr}\ncommand timed out after ${options.timeoutMs ?? 60_000}ms`.trim(),
+    };
+  }
   return { code, stdout, stderr };
 }
 

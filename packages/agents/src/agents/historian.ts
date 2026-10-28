@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import { GitTool } from "@vibefix/adapters";
 import type { ProductIntent } from "@vibefix/schemas";
 import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from "../contract.js";
@@ -26,7 +24,7 @@ export class Historian implements VibeFixAgent {
       let readme = "";
       for (const name of ["README.md", "readme.md", "README", "docs/README.md"]) {
         try {
-          readme = await fs.readFile(path.join(ctx.repoPath, ...name.split("/")), "utf8");
+          readme = await ctx.tools.fs.readFile(ctx.repoPath, name);
           sources.push(name);
           break;
         } catch {
@@ -37,7 +35,7 @@ export class Historian implements VibeFixAgent {
       const packageHints: string[] = [];
       for (const name of ["package.json", "pyproject.toml", "Cargo.toml", "go.mod"]) {
         try {
-          const raw = await fs.readFile(path.join(ctx.repoPath, name), "utf8");
+          const raw = await ctx.tools.fs.readFile(ctx.repoPath, name);
           sources.push(name);
           if (name === "package.json") {
             const pkg = JSON.parse(raw) as { name?: string; description?: string };

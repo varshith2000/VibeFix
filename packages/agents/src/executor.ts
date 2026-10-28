@@ -97,7 +97,10 @@ export class VibefixExecutor implements AgentExecutorPort {
     this.facts = factsFor(services.repoPath);
     this.runner = new NodeTestRunner();
     this.router = new LlmRouter(services.config.routing, env, (agentId, providerId, usage) => {
-      services.meter.record(usage.totalTokens, agentId, providerId);
+      const provider = services.config.routing.providers.find((p) => p.providerId === providerId);
+      const inputCost = ((usage.inputTokens ?? 0) * (provider?.pricePerMTokInput ?? 0)) / 1_000_000;
+      const outputCost = ((usage.outputTokens ?? 0) * (provider?.pricePerMTokOutput ?? 0)) / 1_000_000;
+      services.meter.record(usage.totalTokens, agentId, providerId, inputCost + outputCost);
     });
   }
 

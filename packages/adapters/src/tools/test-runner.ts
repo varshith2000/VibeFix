@@ -26,6 +26,16 @@ function readPackageJson(root: string): Record<string, unknown> | null {
   }
 }
 
+function splitCommandArgs(command: string): string[] {
+  const tokens: string[] = [];
+  const regex = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(command)) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+  }
+  return tokens;
+}
+
 /** Detects runnable install/build/test/typecheck commands from manifests. */
 export class NodeTestRunner implements TestRunner {
   detectCommands(root: string): { install?: string; build?: string; test?: string; typecheck?: string; lint?: string } {
@@ -52,7 +62,7 @@ export class NodeTestRunner implements TestRunner {
 
   async runCommand(root: string, command: string, timeoutMs = 300_000): Promise<TestRunResult> {
     const started = Date.now();
-    const parts = command.split(/\s+/);
+    const parts = splitCommandArgs(command);
     const cmd = parts[0];
     const args = parts.slice(1);
     if (!cmd) {

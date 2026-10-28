@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { decodeArtifact, encodeArtifact, makeArtifact, RepoConfigSchema, DEFAULT_MODEL_ROUTING } from "../src/index.js";
+import {
+  decodeArtifact,
+  encodeArtifact,
+  makeArtifact,
+  migrateArtifact,
+  migrateRunState,
+  migrateEvent,
+  RepoConfigSchema,
+  DEFAULT_MODEL_ROUTING,
+} from "../src/index.js";
 import type { BacklogArtifact } from "../src/index.js";
 
 const backlog: BacklogArtifact = {
@@ -62,5 +71,45 @@ describe("artifact codec", () => {
       schemaVersion: 99,
     };
     expect(() => decodeArtifact(artifact)).toThrow(/upgrade VibeFix|No migration/);
+  });
+
+  it("fails loudly when a migration step is missing (MIG-03)", () => {
+    const older = {
+      ...makeArtifact({ artifactId: "art_test4", kind: "backlog", producer: "synthesis", runId: "run_test", data: backlog }),
+      schemaVersion: 0,
+    };
+    expect(() => migrateArtifact(older as never)).toThrow(/No migration from artifact schemaVersion 0 for artifact art_test4/);
+  });
+
+  it("validates and rejects future or unsupported versions for RunState and Event schemas (MIG-02)", () => {
+    const validState = {
+      runId: "run_abc123",
+      repoPath: "/tmp/repo",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: "running",
+      phase: "recon",
+      mode: "minimal",
+      agentStates: {},
+      execution: { queue: [], currentIndex: 0, attempt: 0, stage: "implement" },
+      approval: { requested: false, decidedAt: null, approvedItems: [], mode: null },
+      budget: { tokensSpent: 0, changesCommitted: 0, retriesUsed: 0 },
+      error: null,
+      schemaVersion: 1,
+    };
+    expect(migrateRunState(validState).runId).toBe("run_abc123");
+    expect(() => migrateRunState({ ...validState, schemaVersion: 99 })).toThrow(/upgrade VibeFix/);
+    expect(() => migrateRunState({ ...validState, schemaVersion: 0 })).toThrow(/No migration/);
+
+    const validEvent = {
+      eventId: "evt_1",
+      runId: "run_abc123",
+      ts: new Date().toISOString(),
+      seq: 1,
+      type: "log",
+      message: "ok",
+    };
+    expect(migrateEvent(validEvent).schemaVersion).toBe(1);
+    expect(() => migrateEvent({ ...validEvent, schemaVersion: 99 })).toThrow(/upgrade VibeFix/);
   });
 });

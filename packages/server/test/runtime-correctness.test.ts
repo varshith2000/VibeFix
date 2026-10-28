@@ -3,11 +3,13 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
+import { WebSocket } from "ws";
 import type { AgentExecutionEvent } from "@vibefix/schemas";
 import { buildApp } from "../src/app.js";
 import { ProjectRegistry } from "../src/projects.js";
 import { EventLog, runPaths, type OrchestratorRuntime } from "@vibefix/core";
 import { bridgeReplayToLive } from "../src/ws-replay.js";
+import { createShutdownHandler } from "../src/main.js";
 
 const TOKEN = "test-token-0123456789abcdef";
 const auth = { authorization: `Bearer ${TOKEN}` };
@@ -126,6 +128,30 @@ describe("idempotency keys (approve / abort / resume)", () => {
     expect(second.json()).toEqual(first.json());
 
     // The double fake runtime records every dispatch: exactly ONE approval.
+    expect((rt as never as { __dispatchCalls: unknown[] }).__dispatchCalls.filter((c) => c.type === "CHECKPOINT_APPROVED")).toHaveLength(1);
+  });
+
+  it("serializes concurrent approve requests with the same Idempotency-Key into one dispatch (REL-01)", async () => {
+    const repo = path.join(home, "repoB-concurrent");
+    const rt = fakeRuntime({
+      runId: "run_idemconcur01",
+      repoPath: repo,
+      dispatch: async () => {
+        await wait(30);
+      },
+    });
+    registry.registerRuntime(rt, repo);
+    const url = `/api/projects/${b64(repo)}/runs/run_idemconcur01/approve`;
+    const headers = { ...auth, "content-type": "application/json", "idempotency-key": "concur-key-1" };
+
+    const [r1, r2] = await Promise.all([
+      app.inject({ method: "POST", url, headers, payload: { mode: "minimal" } }),
+      app.inject({ method: "POST", url, headers, payload: { mode: "minimal" } }),
+    ]);
+    expect(r1.statusCode).toBe(200);
+    expect(r2.statusCode).toBe(200);
+    const replays = [r1.headers["x-idempotent-replay"], r2.headers["x-idempotent-replay"]].filter((h) => h === "true");
+    expect(replays).toHaveLength(1);
     expect((rt as never as { __dispatchCalls: unknown[] }).__dispatchCalls.filter((c) => c.type === "CHECKPOINT_APPROVED")).toHaveLength(1);
   });
 
@@ -256,6 +282,104 @@ describe("websocket replay/subscribe ordering", () => {
     const seqs = eventFrames.map((f) => f.seq);
     expect(seqs).toEqual([1, 2, 3, 4]); // none lost, none duplicated, in order
     unsubscribe();
+  });
+
+  it("streams real WebSocket events across reconnect with since=lastSeq without gaps or duplicates (GATE-08, REL-05)", async () => {
+    const wsRepo = path.join(home, "repoWS");
+    const runId = "run_wssocket001";
+    const paths = runPaths(wsRepo, runId);
+    await mkdir(paths.runDir, { recursive: true });
+    const log = new EventLog(paths);
+    await log.append(runId, "agent.started", { agentId: "cartographer" });
+    await log.append(runId, "agent.completed", { agentId: "cartographer" });
+
+    const rt = fakeRuntime({ runId, repoPath: wsRepo, phase: "recon", status: "running", events: log });
+    registry.registerRuntime(rt, wsRepo);
+
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const baseWs = address.replace(/^http/, "ws");
+      const received1: number[] = [];
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${baseWs}/ws?runId=${runId}&enc=${b64(wsRepo)}&since=0&token=${TOKEN}`);
+        ws.on("message", (raw) => {
+          const msg = JSON.parse(raw.toString()) as { t: string; seq?: number };
+          if (msg.t === "event" && typeof msg.seq === "number") {
+            received1.push(msg.seq);
+            if (received1.length === 2) {
+              ws.close();
+              resolve();
+            }
+          }
+        });
+        ws.on("error", reject);
+      });
+      expect(received1).toEqual([1, 2]);
+
+      await log.append(runId, "agent.started", { agentId: "historian" });
+      const received2: number[] = [];
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${baseWs}/ws?runId=${runId}&enc=${b64(wsRepo)}&since=2&token=${TOKEN}`);
+        ws.on("message", (raw) => {
+          const msg = JSON.parse(raw.toString()) as { t: string; seq?: number };
+          if (msg.t === "snapshot") {
+            void log.append(runId, "agent.completed", { agentId: "historian" });
+          }
+          if (msg.t === "event" && typeof msg.seq === "number") {
+            received2.push(msg.seq);
+            if (received2.length === 2) {
+              ws.close();
+              resolve();
+            }
+          }
+        });
+        ws.on("error", reject);
+      });
+      expect(received2).toEqual([3, 4]);
+    } finally {
+      await app.close();
+      app = await buildApp(registry, { security: { token: TOKEN } });
+      await app.ready();
+    }
+  });
+});
+
+describe("observability & graceful shutdown (OBS-02, OBS-03, OBS-05, OBS-07, REL-13)", () => {
+  it("exposes /api/ready, /api/metrics, and /api/diagnostics", async () => {
+    const readyRes = await app.inject({ method: "GET", url: "/api/ready" });
+    expect(readyRes.statusCode).toBe(200);
+    expect(readyRes.json().status).toBe("ready");
+
+    const metricsRes = await app.inject({ method: "GET", url: "/api/metrics", headers: auth });
+    expect(metricsRes.statusCode).toBe(200);
+    expect(typeof metricsRes.json().activeRuntimes).toBe("number");
+
+    const diagRes = await app.inject({ method: "GET", url: "/api/diagnostics", headers: auth });
+    expect(diagRes.statusCode).toBe(200);
+    expect(typeof diagRes.json().version).toBe("string");
+    expect(typeof diagRes.json().activeRuntimes).toBe("number");
+  });
+
+  it("createShutdownHandler aborts active runs, awaits tracked work, and closes the server (REL-13)", async () => {
+    const tempReg = new ProjectRegistry();
+    const tempApp = await buildApp(tempReg, { security: { token: TOKEN } });
+    await tempApp.ready();
+
+    const rt = fakeRuntime({ runId: "run_shutdown001", repoPath: path.join(home, "repo-shutdown"), phase: "recon", status: "running" });
+    tempReg.registerRuntime(rt, path.join(home, "repo-shutdown"));
+    let exitCode: number | undefined;
+    const shutdown = createShutdownHandler({
+      app: tempApp,
+      registry: tempReg,
+      timeoutMs: 5_000,
+      exit: (code) => {
+        exitCode = code;
+      },
+    });
+    await shutdown("SIGTERM");
+    expect(exitCode).toBe(0);
+    const calls = (rt as never as { __dispatchCalls: Array<{ type: string }> }).__dispatchCalls;
+    expect(calls.some((c) => c.type === "ABORT")).toBe(true);
   });
 });
 

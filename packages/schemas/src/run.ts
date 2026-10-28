@@ -81,6 +81,8 @@ export const RunStateSchema = z.object({
     decidedAt: z.string().datetime().nullable(),
     approvedItems: z.array(z.string()),
     mode: RefactoringModeSchema.nullable(),
+    /** SAFE-08: SHA-256 scope hashes recorded at approval to prevent post-approval mutation. */
+    scopeHashes: z.record(z.string(), z.string()).optional(),
   }),
   budget: RunBudgetSchema,
   error: z.string().nullable(),

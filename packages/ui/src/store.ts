@@ -73,10 +73,12 @@ export const useRunStore = create<RunStore>((set, get) => ({
     const attemptConnection = () => {
       if (!isCurrent()) return;
       const protocol = location.protocol === "https:" ? "wss" : "ws";
+      const priorEvents = get().events;
+      const lastSeq = priorEvents.length > 0 ? (priorEvents[priorEvents.length - 1]?.seq ?? 0) : 0;
       // Project-scoped: the server refuses a runId that does not belong to
       // the named project (enc), and the token reaches it via the Vite proxy.
       const ws = new WebSocket(
-        `${protocol}://${location.host}/ws?runId=${encodeURIComponent(runId)}&enc=${encodeURIComponent(encPath(repoPath))}`,
+        `${protocol}://${location.host}/ws?runId=${encodeURIComponent(runId)}&enc=${encodeURIComponent(encPath(repoPath))}&since=${lastSeq}`,
       );
 
       ws.onopen = () => {

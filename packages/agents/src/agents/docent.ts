@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import {
   BacklogArtifactSchema,
   FindingsArtifactSchema,
@@ -12,7 +10,6 @@ import { passed, failed, type AgentExecutionContext, type VibeFixAgent } from ".
 import { definitionFor } from "../definitions.js";
 import { enrich } from "../runtime/text-agent-loop.js";
 import { architectureMermaid, existingArchitectureNarrative } from "../shared/explain.js";
-import { runPaths } from "@vibefix/core";
 import { z } from "zod";
 
 /**
@@ -29,7 +26,7 @@ export class Docent implements VibeFixAgent {
       const graph = (await ctx.store.latest("knowledge-graph"))?.data;
       const survey = (await ctx.store.latest("test-survey"))?.data;
       const backlog = (await ctx.store.latest("backlog"))?.data;
-      const verdicts: Array<{ proposalId: string; verdict: string; gates: Array<{ gate: string; result: string }> }> = [];
+      const verdicts: Array<{ proposalId: string; verdict: string; gates: Array<{ gate: string; result: string; details?: string }> }> = [];
       for (const artifact of await ctx.store.list("verifier", "verdict")) {
         try {
           const v = VerdictArtifactSchema.parse(artifact.data);
@@ -53,11 +50,10 @@ export class Docent implements VibeFixAgent {
       const surveyData = survey ? TestSurveyArtifactSchema.parse(survey) : null;
       const backlogData = backlog ? BacklogArtifactSchema.parse(backlog) : null;
 
-      const paths = runPaths(ctx.repoPath, ctx.runState.runId);
-      const ledgerPath = paths.ledgerFile;
-      const ledger = await fs.readFile(ledgerPath, "utf8").then(JSON.parse).catch(() => ({ entries: [] })) as {
-        entries: Array<{ proposalId: string; verdict: string; committedRef: string | null }>;
-      };
+      const ledger = await ctx.store.readLedger();
+      const blockedByPolicy = verdicts.some((v) =>
+        v.gates.some((g) => g.details?.includes("blocked by execution policy")),
+      );
 
       const committed = ledger.entries.filter((e) => e.verdict === "passed" && e.committedRef);
       const totals: ReportArtifact["totals"] = {
@@ -110,6 +106,9 @@ export class Docent implements VibeFixAgent {
           ...(surveyData && surveyData.testFileCount === 0
             ? ["Behavior — no runnable test suite existed, so no behavior-affecting change was permitted"]
             : []),
+          ...(blockedByPolicy
+            ? ["Verification status: not verified (repository command execution blocked by execution policy; landing blocked)"]
+            : []),
         ],
         learningSummary:
           "Every change was proposed as evidence-backed Change Proposal, implemented in an isolated git worktree, " +
@@ -155,9 +154,7 @@ export class Docent implements VibeFixAgent {
       });
       // report.md twin for easy reading / future UI rendering.
       const reportMd = renderMarkdown(deterministic);
-      const mdPath = paths.reportFile;
-      await fs.mkdir(path.dirname(mdPath), { recursive: true }).catch(() => undefined);
-      await fs.writeFile(mdPath, reportMd, "utf8").catch(() => undefined);
+      await ctx.store.writeReportMarkdown(reportMd);
 
       return passed([artifact.artifactId]);
     } catch (err) {

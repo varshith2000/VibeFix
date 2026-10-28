@@ -56,6 +56,22 @@ export class ProjectRegistry {
     return this.managers.get(registryKey(repoPath));
   }
 
+  removeProject(repoPath: string): void {
+    const key = registryKey(repoPath);
+    this.managers.delete(key);
+    for (const [id, entry] of this.runtimes.entries()) {
+      if (registryKey(entry.repoPath) === key) {
+        this.runtimes.delete(id);
+        this.background.delete(id);
+      }
+    }
+  }
+
+  removeRun(runId: string): void {
+    this.runtimes.delete(runId);
+    this.background.delete(runId);
+  }
+
   registerRuntime(runtime: OrchestratorRuntime, repoPath: string): void {
     this.runtimes.set(runtime.runId, { runtime, repoPath });
     this.watchForTerminal(runtime);

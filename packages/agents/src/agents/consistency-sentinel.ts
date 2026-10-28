@@ -134,9 +134,7 @@ function push(map: Map<string, string[]>, key: string, path: string): void {
 
 async function readSafe(ctx: AgentExecutionContext, rel: string): Promise<string | null> {
   try {
-    const { promises: fs } = await import("node:fs");
-    const path = await import("node:path");
-    return await fs.readFile(path.join(ctx.repoPath, ...rel.split("/")), "utf8");
+    return await ctx.tools.fs.readFile(ctx.repoPath, rel);
   } catch {
     return null;
   }

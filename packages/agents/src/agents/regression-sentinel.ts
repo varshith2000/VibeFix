@@ -27,10 +27,10 @@ export class RegressionSentinel implements VibeFixAgent {
         ? BehavioralBaselineArtifactSchema.safeParse(baselineArtifact.data)
         : null;
       const baselineRun = baseline?.success
-        ? (baseline.data.baselineResults as { suiteAvailable?: boolean; ok?: boolean } | undefined)
+        ? (baseline.data.baselineResults as { suiteAvailable?: boolean; ok?: boolean; outputTail?: string } | undefined)
         : undefined;
 
-      // Test suite: only hard-fail if baseline was green and worktree flipped.
+      // Test suite: fail closed if baseline was red or blocked by policy, or if worktree flipped.
       if (!commands.test) {
         gates.push({
           gate: "regression-suite",
@@ -43,17 +43,28 @@ export class RegressionSentinel implements VibeFixAgent {
           result: "NOT_APPLICABLE",
           details: "no green baseline suite; not forcing a red gate",
         });
+      } else if (baselineRun.ok !== true) {
+        const blockedByPolicy = Boolean(baselineRun.outputTail?.includes("blocked by execution policy"));
+        gates.push({
+          gate: "regression-suite",
+          result: "FAIL",
+          details: blockedByPolicy
+            ? "NOT_APPLICABLE (policy): blocked by execution policy — proposals cannot land without executable verification"
+            : "baseline suite was not green; behavior preservation cannot be established",
+        });
       } else {
         await ctx.progress("running test suite");
         const run = await ctx.tools.runner.runCommand(worktree.path, commands.test, 300_000);
-        const baselineOk = baselineRun.ok === true;
+        const blockedByPolicy = run.outputTail.includes("blocked by execution policy");
         gates.push({
           gate: "regression-suite",
-          result: !baselineOk || run.ok === baselineOk ? "PASS" : "FAIL",
+          result: run.ok ? "PASS" : "FAIL",
           details:
-            run.ok === baselineOk
-              ? `suite outcome unchanged (ok=${run.ok})`
-              : `suite flipped vs baseline ok=${baselineOk}:\n${run.outputTail.slice(-1_500)}`,
+            run.ok
+              ? "suite outcome unchanged (ok=true)"
+              : blockedByPolicy
+                ? "NOT_APPLICABLE (policy): blocked by execution policy — proposals cannot land without executable verification"
+                : `suite flipped vs baseline ok=true:\n${run.outputTail.slice(-1_500)}`,
         });
       }
 

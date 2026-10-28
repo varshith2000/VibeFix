@@ -1,7 +1,5 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import { GitTool } from "@vibefix/adapters";
-import { globMatchAny } from "@vibefix/core";
+import { ChangeFirewall } from "@vibefix/core";
 import {
   BehavioralBaselineArtifactSchema,
   type BehavioralBaselineArtifact,
@@ -33,10 +31,11 @@ export class BehaviorVerifier implements VibeFixAgent {
       await ctx.progress("running deterministic gates");
       const gates: GateResult[] = [];
 
-      // (a) firewall-scope
+      // (a) firewall-scope (SAFE-09: checks filesInScope, filesOutOfScope, protected paths, manifests, forbiddenZones)
       const git = new GitTool(worktree.path);
       const changed = await git.changedFilesBetween(worktree.baseCommit, "HEAD", worktree.path);
-      const outOfScope = changed.filter((f) => !globMatchAny(proposal.filesInScope, f.replace(/\\/g, "/")));
+      const fw = new ChangeFirewall(proposal, ctx.forbiddenZones ?? []);
+      const outOfScope = changed.filter((f) => !fw.canWrite(f.replace(/\\/g, "/")).allowed);
       gates.push({
         gate: "firewall-scope",
         result: outOfScope.length === 0 ? "PASS" : "FAIL",
@@ -52,7 +51,7 @@ export class BehaviorVerifier implements VibeFixAgent {
         ? BehavioralBaselineArtifactSchema.parse(baselineArtifact.data)
         : null;
       const baselineRun = baseline?.baselineResults as
-        | { suiteAvailable: boolean; ok?: boolean; command?: string }
+        | { suiteAvailable: boolean; ok?: boolean; command?: string; outputTail?: string }
         | undefined;
       if (!baselineRun?.suiteAvailable) {
         gates.push({
@@ -61,20 +60,26 @@ export class BehaviorVerifier implements VibeFixAgent {
           details: "no runnable suite at baseline; relying on surface + residual checks",
         });
       } else if (baselineRun.ok !== true) {
+        const blockedByPolicy = Boolean(baselineRun.outputTail?.includes("blocked by execution policy"));
         gates.push({
           gate: "regression-suite",
           result: "FAIL",
-          details: "baseline suite was not green; behavior preservation cannot be established",
+          details: blockedByPolicy
+            ? "NOT_APPLICABLE (policy): blocked by execution policy — proposals cannot land without executable verification"
+            : "baseline suite was not green; behavior preservation cannot be established",
         });
       } else {
         const run = await ctx.tools.runner.runCommand(worktree.path, baselineRun.command ?? "npm test", 300_000);
+        const blockedByPolicy = run.outputTail.includes("blocked by execution policy");
         gates.push({
           gate: "regression-suite",
           result: run.ok ? "PASS" : "FAIL",
           details:
             run.ok
               ? "previously-green suite remains green"
-              : `previously-green suite failed in the worktree\n${run.outputTail.slice(-1_500)}`,
+              : blockedByPolicy
+                ? "NOT_APPLICABLE (policy): blocked by execution policy — proposals cannot land without executable verification"
+                : `previously-green suite failed in the worktree\n${run.outputTail.slice(-1_500)}`,
         });
       }
 
@@ -192,7 +197,7 @@ export class BehaviorVerifier implements VibeFixAgent {
       );
       let content: string;
       try {
-        content = await fs.readFile(path.join(worktreePath, ...file.split("/")), "utf8");
+        content = await ctx.tools.fs.readFile(worktreePath, file.replace(/\\/g, "/"));
       } catch {
         for (const symbol of baselineForFile) drift.push(`-${symbol}`);
         continue;

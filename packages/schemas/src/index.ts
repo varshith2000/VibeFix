@@ -15,7 +15,14 @@ import {
   TestSurveyArtifactSchema,
 } from "./survey.js";
 import { ReportArtifactSchema } from "./report.js";
-import { migrateArtifact, ARTIFACT_SCHEMA_VERSION } from "./migrations.js";
+import {
+  migrateArtifact,
+  migrateRunState,
+  migrateEvent,
+  ARTIFACT_SCHEMA_VERSION,
+  STATE_SCHEMA_VERSION,
+  EVENT_SCHEMA_VERSION,
+} from "./migrations.js";
 
 export * from "./agent.js";
 export * from "./mode.js";
@@ -32,7 +39,14 @@ export * from "./redaction.js";
 export * from "./survey.js";
 export * from "./report.js";
 export * from "./intent.js";
-export { ARTIFACT_SCHEMA_VERSION, migrateArtifact } from "./migrations.js";
+export {
+  ARTIFACT_SCHEMA_VERSION,
+  STATE_SCHEMA_VERSION,
+  EVENT_SCHEMA_VERSION,
+  migrateArtifact,
+  migrateRunState,
+  migrateEvent,
+} from "./migrations.js";
 
 import { ProductIntentSchema } from "./intent.js";
 

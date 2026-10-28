@@ -1,5 +1,4 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
+import { WorktreeManager, type WorktreeHandle } from "@vibefix/core";
 import type {
   BehavioralBaselineArtifact,
   CharacterizationPlan,
@@ -41,7 +40,7 @@ export class HarnessBuilder implements VibeFixAgent {
       for (const file of codeFiles.slice(0, 400)) {
         let content: string;
         try {
-          content = await fs.readFile(path.join(ctx.repoPath, ...file.path.split("/")), "utf8");
+          content = await ctx.tools.fs.readFile(ctx.repoPath, file.path);
         } catch {
           continue;
         }
@@ -56,31 +55,48 @@ export class HarnessBuilder implements VibeFixAgent {
       }
       surface.sort();
 
+      const excluded: Array<{ test: string; reason: string }> =
+        codeFiles.length > 400
+          ? [{ test: `truncatedAt:400`, reason: `degraded: surface pin truncated at 400 of ${codeFiles.length} code files` }]
+          : [];
+
       const commands = ctx.tools.runner.detectCommands(ctx.repoPath);
       await ctx.progress(commands.test ? "running existing suite for baseline" : "no runnable suite; pinning surface only");
       let baselineResults: unknown = { suiteAvailable: false };
       if (commands.test) {
-        const run = await ctx.tools.runner.runCommand(ctx.repoPath, commands.test, 300_000);
-        baselineResults = {
-          suiteAvailable: true,
-          command: commands.test,
-          ok: run.ok,
-          exitCode: run.exitCode,
-          outputTail: run.outputTail.slice(-4_000),
-        };
+        const wm = new WorktreeManager(ctx.repoPath);
+        let handle: WorktreeHandle | null = null;
+        try {
+          handle = await wm.create("RFC-000", 0);
+        } catch {
+          handle = null;
+        }
+        try {
+          const targetDir = handle ? handle.path : ctx.repoPath;
+          const run = await ctx.tools.runner.runCommand(targetDir, commands.test, 300_000);
+          baselineResults = {
+            suiteAvailable: true,
+            command: commands.test,
+            ok: run.ok,
+            exitCode: run.exitCode,
+            outputTail: run.outputTail.slice(-4_000),
+          };
+        } finally {
+          if (handle) await wm.discard(handle).catch(() => undefined);
+        }
       }
 
       const plan: CharacterizationPlan = {
         branch: "vibefix/harness",
         testFiles: [],
         publicApiSurface: surface,
-        excluded: [],
+        excluded,
       };
       const baseline: BehavioralBaselineArtifact = {
         harnessBranch: "vibefix/harness",
         testFiles: ctx.tools.snapshot.files.filter((f) => /\.test\.[jt]sx?$|\.spec\.[jt]sx?$/.test(f.path)).map((f) => f.path),
         baselineResults,
-        excluded: [],
+        excluded,
         publicApiSurface: surface,
       };
 

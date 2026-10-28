@@ -10,6 +10,15 @@ function isBrowseRoot(pathname: string, roots: readonly string[]): boolean {
   return roots.some((root) => pathname === root || isPathInside(root, pathname));
 }
 
+async function resolveRealRoots(roots: readonly string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const root of roots) {
+    const resolved = await fs.realpath(root).catch(() => path.resolve(root));
+    out.push(resolved);
+  }
+  return out;
+}
+
 async function repoRoot(enc: string, reply: import("fastify").FastifyReply, context: ServerContext): Promise<string | null> {
   const repoPath = context.decodeProject(enc, reply);
   if (!repoPath) return null;
@@ -26,18 +35,32 @@ async function repoRoot(enc: string, reply: import("fastify").FastifyReply, cont
 export function registerRepositoryRoutes(app: FastifyInstance, context: ServerContext): void {
   app.get("/api/fs/browse", async (req, reply) => {
     const requested = (req.query as { path?: string }).path;
-    if (requested !== undefined && !path.isAbsolute(requested)) return reply.code(400).send({ error: "path must be absolute" });
+    if (requested !== undefined && !path.isAbsolute(requested)) {
+      return reply.code(400).send({ error: "path must be absolute", code: "E_PATH_ESCAPE" });
+    }
     const dir = requested && requested.trim().length > 0 ? path.resolve(requested) : path.resolve(homedir());
     if (!isBrowseRoot(dir, context.allowedBrowseRoots)) {
-      return reply.code(403).send({ error: "browse path is outside the allowed browse roots" });
+      return reply.code(403).send({ error: "browse path is outside the allowed browse roots", code: "E_PATH_ESCAPE" });
+    }
+    const realRoots = await resolveRealRoots(context.allowedBrowseRoots);
+    const realDir = await fs.realpath(dir).catch(() => null);
+    if (realDir && !isBrowseRoot(realDir, realRoots)) {
+      return reply.code(403).send({ error: "browse path resolves outside the allowed browse roots", code: "E_PATH_ESCAPE" });
     }
     const drives = context.allowedBrowseRoots;
     let entries;
     try { entries = await fs.readdir(dir, { withFileTypes: true }); }
     catch { return { path: dir, parent: path.dirname(dir), dirs: [], gitDirs: [], drives, error: "cannot read this location" }; }
-    const dirs = entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") &&
+    const candidateDirs = entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") &&
       !["node_modules", "windows", "$recycle.bin", "system volume information"].includes(entry.name.toLowerCase()))
       .map((entry) => entry.name).sort();
+    const dirs: string[] = [];
+    for (const name of candidateDirs) {
+      const childReal = await fs.realpath(path.join(dir, name)).catch(() => null);
+      if (childReal && isBrowseRoot(childReal, realRoots)) {
+        dirs.push(name);
+      }
+    }
     const gitDirs = new Set<string>();
     await Promise.all(dirs.map(async (name) => {
       try { await fs.access(path.join(dir, name, ".git")); gitDirs.add(name); } catch { /* not a repo */ }
@@ -66,9 +89,9 @@ export function registerRepositoryRoutes(app: FastifyInstance, context: ServerCo
     try { rootReal = await fs.realpath(path.resolve(root)); }
     catch { return reply.code(400).send({ error: "repository not found" }); }
     const abs = path.resolve(rootReal, rel);
-    if (!isPathInside(rootReal, abs)) return reply.code(400).send({ error: "path escapes the repository" });
+    if (!isPathInside(rootReal, abs)) return reply.code(400).send({ error: "path escapes the repository", code: "E_PATH_ESCAPE" });
     const real = await fs.realpath(abs).catch(() => null);
-    if (real && !isPathInside(rootReal, real)) return reply.code(400).send({ error: "path escapes the repository" });
+    if (real && !isPathInside(rootReal, real)) return reply.code(400).send({ error: "path escapes the repository", code: "E_PATH_ESCAPE" });
     try {
       const stat = await fs.stat(abs);
       if (stat.size > 500_000) return { path: rel, content: "(file too large to display)", truncated: true };

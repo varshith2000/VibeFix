@@ -3,8 +3,10 @@ import path from "node:path";
 import {
   decodeArtifact,
   encodeArtifact,
+  redactSecrets,
   redactUnknown,
   type ArtifactKind,
+  type ChangeLedgerEntry,
   type EvidenceArtifact,
 } from "@vibefix/schemas";
 import { artifactId } from "../util/ids.js";
@@ -17,11 +19,15 @@ export interface EvidenceReader {
   read(artifactId: string): Promise<EvidenceArtifact | null>;
   /** Resumability: has this producer already written artifacts of these kinds? */
   hasArtifacts(producer: string, kinds: readonly ArtifactKind[]): Promise<boolean>;
+  /** Read the run's change ledger entries without direct fs access in agents (SAFE-04). */
+  readLedger(): Promise<{ entries: ChangeLedgerEntry[] }>;
 }
 
 /** Write side: what agents produce. Artifacts are immutable once written. */
 export interface EvidenceWriter {
   write(input: { kind: ArtifactKind; producer: string; runId: string; data: unknown }): Promise<EvidenceArtifact>;
+  /** Write the redacted markdown report twin without direct fs access in agents (SAFE-04 / SEC-10). */
+  writeReportMarkdown(markdown: string): Promise<void>;
 }
 
 export class EvidenceStore implements EvidenceReader, EvidenceWriter {
@@ -159,6 +165,21 @@ export class EvidenceStore implements EvidenceReader, EvidenceWriter {
     const artifacts = await this.list(producer);
     const produced = new Set(artifacts.map((a) => a.kind));
     return kinds.every((k) => produced.has(k));
+  }
+
+  async readLedger(): Promise<{ entries: ChangeLedgerEntry[] }> {
+    if (!this.paths.ledgerFile) return { entries: [] };
+    try {
+      const raw = JSON.parse(await fs.readFile(this.paths.ledgerFile, "utf8")) as { entries?: ChangeLedgerEntry[] };
+      return { entries: Array.isArray(raw.entries) ? raw.entries : [] };
+    } catch {
+      return { entries: [] };
+    }
+  }
+
+  async writeReportMarkdown(markdown: string): Promise<void> {
+    if (!this.paths.reportFile) return;
+    await atomicWrite(this.paths.reportFile, redactSecrets(markdown)).catch(() => undefined);
   }
 }
 

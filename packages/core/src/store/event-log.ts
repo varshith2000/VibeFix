@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import type { AgentExecutionEvent, AgentExecutionEventType } from "@vibefix/schemas";
-import { redactSecrets, redactUnknown } from "@vibefix/schemas";
+import { migrateEvent, redactSecrets, redactUnknown } from "@vibefix/schemas";
 import { eventId } from "../util/ids.js";
 import type { RunPaths } from "./paths.js";
 
@@ -59,7 +59,7 @@ export class EventLog {
     for (const line of content.split("\n")) {
       if (!line.trim()) continue;
       try {
-        const parsed = JSON.parse(line) as AgentExecutionEvent;
+        const parsed = migrateEvent(JSON.parse(line));
         if (parsed.seq > sinceSeq) out.push(parsed);
       } catch {
         corruptLines += 1; // corrupt line — counted, never silently skipped
@@ -91,6 +91,7 @@ export class EventLog {
           ...fields,
           ...(fields.message ? { message: redactSecrets(fields.message) } : {}),
           ...(fields.payload !== undefined ? { payload: redactUnknown(fields.payload) } : {}),
+          schemaVersion: 1,
         };
         await fs.appendFile(this.paths.eventsFile, `${JSON.stringify(event)}\n`, "utf8");
         this.seq = event.seq;
