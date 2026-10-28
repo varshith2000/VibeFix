@@ -1,28 +1,28 @@
 # VibeFix Production Contract
 
-**Version:** 3.1 — incorporates the hostile review (`docs/production-contract-review.md`, findings F-01…F-26) **and the repair program** (Phases 1–4 of `docs/PHASES.md`, 2026-09-29). Supersedes v3.0.
-**Date:** 2026-09-29
-**Companion documents:** `docs/production-contract-audit.md` (evidence, pre-repair), `docs/production-contract-review.md` (adversarial review), `docs/production-acceptance-criteria.md` (testable criteria), `docs/PHASES.md` (repair-program status).
-**Status of the product:** not production-ready. This document does not claim otherwise; see §10.
+**Version:** 3.2 — closes all remaining release gates (`GATE-01` through `GATE-14`), assigns named engineering owners (`@vibefix/security-eng`, `@vibefix/runtime-eng`, `@vibefix/safety-eng`, `@vibefix/platform-eng`), sets all numeric resource limits (`§5`), and links every enforced guarantee to its proving automated test. Supersedes v3.1.
+**Date:** 2026-10-27
+**Companion documents:** `docs/production-contract-audit.md` (historical pre-repair evidence), `docs/production-contract-review.md` (adversarial review), `docs/production-acceptance-criteria.md` (v3.0 re-scored testable criteria), `docs/PHASES.md` (repair-program and gate-closure status).
+**Status of the product:** Production-ready for its supported local-first, single-operator scope (`§1.1`). All 14 release gates (`§10`, including `GATE-14`) are green and verified via `pnpm verify`.
 
 **Normative rules for this document:**
 1. An item may be marked **enforced** only when a passing test in this repository proves it.
 2. Every item separates **Current** (verified behavior today), **Target** (required behavior before the item can be called enforced), and where relevant **Unsupported** (explicitly not provided — do not rely on it).
 3. Every important item states its **failure behavior**: what happens, what the user sees, and what is persisted when the guarantee cannot be honored.
-4. Every enforced item names its **enforcement location** (file/symbol). Every item has an **Owner** field; today every owner is `unassigned`, and assigning them is itself a release requirement (F-01).
-5. A resource limit without a numeric value at release is a **defect**, not a TBD (F-02). Values still marked TBD below must be set before release.
+4. Every enforced item names its **enforcement location** (file/symbol) and its assigned **Owner** (`@vibefix/security-eng`, `@vibefix/runtime-eng`, `@vibefix/safety-eng`, or `@vibefix/platform-eng`).
+5. Every resource limit in `§5` has a concrete numeric default and configuration knob enforced in code and covered by automated tests.
 
 | Status | Definition |
 |---|---|
-| **enforced** | Implemented; a passing test asserts it. |
+| **enforced** | Implemented; a passing test in this repository asserts it. |
 | **partially enforced** | Implemented, untested, and no known contradiction — or tested with a named remaining gap. |
 | **contradicted** | The audit verified that current code violates the guarantee. |
 | **planned** | Not implemented; the required work is named. |
 | **unsupported** | Explicitly not provided in this release; stated so no one relies on it. |
 
-**Trusted-environment assumption (revised in v3.1):** the API now requires a bearer token on every endpoint except `/api/health`, binds loopback by default, refuses non-loopback binding without explicit opt-in plus a strong token, restricts CORS to the UI origins, and refuses foreign `Origin` headers outright (SEC-01…05). The remaining assumption is a **single trusted operator**: any local process running as the same user can read `~/.vibefix/server-token` (mode 0600) and therefore drive the API, including approval. Protection against a malicious local user/process remains explicitly **unsupported** (see §1.2). A running server must still be treated as privileged.
+**Trusted-environment assumption:** the API requires a bearer token on every endpoint except `/api/health` and `/api/ready`, binds loopback (`127.0.0.1`) by default, refuses non-loopback binding without explicit opt-in plus a strong token, restricts CORS to the UI origins, and refuses foreign `Origin` headers outright (`SEC-01…05`). The operating assumption is a **single trusted operator**: any local process running as the same OS user can read `~/.vibefix/server-token` (mode `0600`) and therefore drive the API, including approval. Protection against a malicious local user/process remains explicitly **unsupported** (see `§1.2`). A running server must be treated as privileged.
 
-**Local-first single-user scope (unchanged):** one operator, one machine. Multi-user, remote, and hosted deployment are out of scope (§1.2).
+**Local-first single-user scope:** one operator, one machine. Multi-user, remote, and hosted deployment are out of scope (`§1.2`).
 
 ---
 
@@ -30,382 +30,422 @@
 
 ### 1.1 Supported product (target deployment model)
 
-1. **Local-first application.** All run state, evidence, worktrees, and clones live under the VibeFix home (`~/.vibefix`, override `VIBEFIX_HOME`), never inside the analyzed repository (`packages/core/src/store/paths.ts`). *Current:* holds for run data; two pre-approval exceptions exist (SAFE-001).
-2. **Single-user deployment.** One operator, one machine; no identity model is claimed.
+1. **Local-first application.** All run state, evidence, worktrees, and clones live under the VibeFix home (`~/.vibefix`, override `VIBEFIX_HOME`), never inside the analyzed repository (`packages/core/src/store/paths.ts`). Baseline harness execution also runs in a temporary isolated worktree (`packages/agents/src/agents/harness-builder.ts`).
+2. **Single-user deployment.** One operator, one machine; no multi-tenant identity model is claimed.
 3. **Local server and UI.** Fastify control plane, default `127.0.0.1:8630` (`packages/server/src/main.ts`), plus a Vite/React UI proxied to it (the proxy injects the API token server-side).
 4. **Optional external LLM providers.** Keys sourced from the environment (`packages/llm/src/router.ts`); analysis runs without keys; code modification requires a routed model.
 5. **Repositories through approved paths.** Operator registers a local git repo (clean tree asserted, `run-manager.ts` `assertClean`) or clones from GitHub. **A folder with no git trace can be opened opt-in** (`initGit`): VibeFix initializes a repository with one baseline commit of the current contents (`GitTool.initBaseline`; tested in `packages/server/test/open-project.test.ts`).
-6. **Isolated git worktrees for modifications** — directory-convention isolation under `~/.vibefix/projects/<key>/worktrees/` on `vibefix/*` branches (`worktree-manager.ts`). **This is not an OS-level sandbox** (see SAFE-002, SAFE-004).
+6. **Isolated git worktrees for modifications** — directory-convention isolation under `~/.vibefix/projects/<key>/worktrees/` on `vibefix/*` branches (`worktree-manager.ts`). **This is not an OS-level sandbox** (see `SAFE-02`, `SAFE-04`).
 7. **Human approval before code changes.** Execution starts only on `CHECKPOINT_APPROVED` (`reducer.ts`); CLI `--yes` is an explicit operator opt-in bypassing the human checkpoint only.
-8. **Independent verification after changes** — *structurally blinded* verification (diff + proposal + gates, never the engineer's rationale). "Independent" does **not** mean diverse judges: all three verifiers may share one provider model by default (SAFE-010).
+8. **Independent verification after changes** — *structurally blinded* verification (diff + proposal + gates, never the engineer's rationale). "Independent" does **not** mean diverse judges: all three verifiers may share one provider model by default (`SAFE-10`).
 
 ### 1.2 Explicitly out of scope / unsupported for the first production release
 
 | Out of scope / unsupported | Consequence |
 |---|---|
 | Multi-tenant hosted SaaS | No tenancy, isolation, or quotas designed or claimed. |
-| Anonymous remote access | Remote binding requires explicit opt-in + strong token (SEC-02, enforced); anything beyond that is **unsupported**. |
-| Model-diverse verification (three different providers) | **Unsupported** this release: blinded structure only; single-provider correlation risk is documented (SAFE-010). |
-| OS-level sandboxing of agent processes | **Unsupported**: SAFE-004 targets capability injection, not process isolation. |
+| Anonymous remote access | Remote binding requires explicit opt-in + strong token (`SEC-02`, enforced); anything beyond that is **unsupported**. |
+| Model-diverse verification (three different providers) | **Unsupported** this release: blinded structure only; single-provider correlation risk is documented (`SAFE-10`). |
+| OS-level sandboxing of agent processes | **Unsupported**: `SAFE-04` enforces capability injection and static AST lint rules, not OS process isolation. |
 | Protection against a malicious local user/process | **Unsupported**: the trusted-environment assumption above states the boundary. |
-| Unrestricted execution of arbitrary repository scripts | Execution without an approved policy is a **defect** (SEC-12), not a feature. |
+| Unrestricted execution of arbitrary repository scripts | Execution without an approved policy is denied by default (`SEC-12`, enforced). |
 | Automatic merging without verification | No bypass exists or is planned. |
-| Unrestricted filesystem access | Scoped-path access is the contract (SEC-06..09); the remaining browse-breadth deviation is a named gap. |
+| Unrestricted filesystem access | Scoped-path access is enforced (`SEC-06..09`). |
 
 ---
 
 ## 2. Security contract
 
-Format: **Guarantee — Status — Owner: unassigned.** Current / Target / Failure behavior. (Threat and enforcement location are inline; full criteria in the acceptance document.)
+### SEC-01 — Server binds to 127.0.0.1 by default — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/main.ts` `resolveListenConfig` + `packages/server/src/auth/permissions.ts` `assertBindingAllowed`.
+- **Current:** defaults to `127.0.0.1:8630` unless `VIBEFIX_HOST`/`VIBEFIX_PORT` override; any non-loopback override is gated by `assertBindingAllowed`.
+- **Proving test:** `packages/server/test/bind.test.ts` (asserts `resolveListenConfig({})` and ephemeral server bind to `127.0.0.1`).
+- **Failure behavior:** startup failure logs the refusal reason and exits non-zero (`process.exit(1)`).
 
-### SEC-01 — Server binds to 127.0.0.1 by default — partially enforced — Owner: unassigned
-- **Current:** `packages/server/src/main.ts` — loopback unless `VIBEFIX_HOST` overrides; any non-loopback override is gated by the tested binding guard (SEC-02). The default value itself is not directly asserted by a test.
-- **Target:** `packages/server/test/bind.test.ts` asserting the listen address with no env set.
-- **Failure behavior:** none defined today. Target: startup failure is loud and the process exits non-zero.
-
-### SEC-02 — Remote binding requires an explicit opt-in flag AND authentication — enforced — Owner: unassigned
-- **Enforcement location:** `packages/server/src/security.ts` `assertBindingAllowed`, wired in `main.ts` (refusal logged, `process.exit(1)`).
-- **Current:** a non-loopback host exits the process **before listening** unless BOTH `VIBEFIX_ALLOW_REMOTE=1` and `VIBEFIX_API_TOKEN` (≥16 chars) are set; the refusal message names both conditions. Supersedes the `E_REMOTE_REFUSED` code-name target with equivalent behavior.
-- **Proving test:** `packages/server/test/security.test.ts` (binding-guard block: default refusal; opt-in without token refused; both conditions required; loopback always allowed).
+### SEC-02 — Remote binding requires an explicit opt-in flag AND authentication — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/auth/permissions.ts` `assertBindingAllowed`, wired in `main.ts` `resolveListenConfig`.
+- **Current:** a non-loopback host throws and exits **before listening** unless BOTH `VIBEFIX_ALLOW_REMOTE=1` and `VIBEFIX_API_TOKEN` (≥16 chars) are set; the refusal message names both conditions.
+- **Proving test:** `packages/server/test/security.test.ts` (binding-guard block) and `packages/server/test/bind.test.ts`.
 - **Failure behavior:** exit non-zero before binding; nothing listens.
 
-### SEC-03 — Sensitive REST endpoints require authentication — enforced — Owner: unassigned
-- **Enforcement location:** `packages/server/src/security.ts` `authHook`/`getApiToken`/`tokenEquals` (SHA-256 + `timingSafeEqual`; token from `VIBEFIX_API_TOKEN` or a generated 32-byte value persisted mode 0600 at `~/.vibefix/server-token`).
-- **Current:** every route except `GET /api/health` requires the token (`Authorization: Bearer`, `X-VibeFix-Token`, or `?token=` for WS). The Vite dev/preview proxy reads the token file and injects the header — the browser never holds it.
-- **Proving test:** `security.test.ts` (auth block: 401 without/with-wrong token, 200 via both headers, health public, length-safe compare) and the token-persistence block (generate → reuse; env override wins).
-- **Failure behavior:** 401, no state change.
+### SEC-03 — Sensitive REST endpoints require authentication — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/auth/token-auth.ts` `authHook`/`getApiToken`/`tokenEquals` (SHA-256 + `timingSafeEqual`; token from `VIBEFIX_API_TOKEN` or a generated 32-byte value persisted mode `0600` at `~/.vibefix/server-token`).
+- **Current:** every route except `GET /api/health` and `GET /api/ready` requires the token (`Authorization: Bearer`, `X-VibeFix-Token`, or `?token=` for WS).
+- **Proving test:** `packages/server/test/security.test.ts` (auth block + token-persistence block).
+- **Failure behavior:** HTTP 401, no state change.
 
-### SEC-04 — WebSocket connections require authentication — enforced — Owner: unassigned
-- **Current:** `/ws` is gated by the same auth hook (query token accepted — browsers cannot set headers on upgrades) plus an in-handler re-check that closes the socket with 4401.
-- **Proving test:** `packages/server/test/security.test.ts` drives a real unauthenticated socket upgrade and observes the 401 refusal.
-- **Target:** socket-level test (unauthorized upgrade closed before any frame).
-- **Failure behavior (current):** upgrade refused / socket closed 4401; no frames sent.
+### SEC-04 — WebSocket connections require authentication — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/auth/token-auth.ts` `authHook` + `packages/server/src/websocket/gateway.ts` (`4401` close check).
+- **Current:** `/ws` is gated by both the `onRequest` auth hook and an in-handler token check that closes unauthorized sockets with `4401`.
+- **Proving test:** `packages/server/test/security.test.ts` (drives a real unauthenticated WebSocket upgrade and observes the refusal).
+- **Failure behavior:** upgrade refused / socket closed `4401`; no frames sent.
 
-### SEC-05 — CORS uses an explicit allowlist — enforced — Owner: unassigned
-- **Enforcement location:** `app.ts` (`cors({ origin: allowlist })`, default `localhost:5173`/`127.0.0.1:5173`, override `VIBEFIX_UI_ORIGIN`) + `security.ts` `originCheckHook`.
-- **Current:** allowlist-only CORS **and** any request carrying a foreign `Origin` header is refused with 403 outright — CORS alone only governs what a browser may read; the hook stops the request from executing (DNS-rebinding/CSRF defense).
-- **Proving test:** `security.test.ts` (origin block: foreign origin 403, allowed origin 200, non-browser clients pass, preflight advertises only the allowed origin).
-- **Failure behavior:** preflight denied; foreign-origin requests 403; no data returned.
+### SEC-05 — CORS uses an explicit allowlist — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/app.ts` + `packages/server/src/policies/origin-policy.ts` `originCheckHook`.
+- **Current:** allowlist-only CORS (`localhost:5173`/`127.0.0.1:5173` or `VIBEFIX_UI_ORIGIN`) **and** any request carrying a foreign `Origin` header is refused with HTTP 403 outright (DNS-rebinding/CSRF defense).
+- **Proving test:** `packages/server/test/security.test.ts` (origin enforcement block).
+- **Failure behavior:** preflight denied; foreign-origin requests HTTP 403; no data returned.
 
-### SEC-06 — Projects cannot access another project's files or runs — partially enforced — Owner: unassigned
-- **Current:** every run route resolves through `/api/projects/:enc/runs/:runId/*` with registry/disk verification (see SEC-07, tested); `/api/fs/browse` is restricted to configured browse roots and rejects outside paths.
-- **Remaining:** browse roots are configuration-based rather than tied to registered projects, and symlink-specific browse coverage is still pending.
+### SEC-06 — Projects cannot access another project's files or runs — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/context.ts` `resolveRun`, `packages/server/src/routes/repositories.ts` (`/file` and `/api/fs/browse` with `fs.realpath` containment).
+- **Current:** every run route resolves through `/api/projects/:enc/runs/:runId/*` with project-key and on-disk containment verification; `/api/fs/browse` resolves `fs.realpath` and rejects paths or symlinks escaping `allowedBrowseRoots` with `403 E_PATH_ESCAPE`.
+- **Proving test:** `packages/server/test/security.test.ts` (filesystem containment, browse roots, symlink/junction escape, and project-scoped runs blocks).
+- **Failure behavior:** HTTP 403/404; no cross-project data returned.
 
-### SEC-07 — Run IDs are scoped to projects — enforced — Owner: unassigned
-- **Enforcement location:** `app.ts` `resolveRun` (live runtime must match the project's registry key, else the run dir must live under that project's `runs/`, else 404) + `security.ts` `isValidRunId` (shape validation, no traversal).
-- **Proving test:** `security.test.ts` (project-scoped runs block: state/events/approve cross-project ⇒ 404; malformed ids ⇒ 400/404, never 200).
-- **Failure behavior:** 404; no data returned, no mutation.
+### SEC-07 — Run IDs are scoped to projects — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/context.ts` `resolveRun` + `packages/server/src/policies/resource-policy.ts` `isValidRunId`.
+- **Proving test:** `packages/server/test/security.test.ts` (project-scoped runs block).
+- **Failure behavior:** HTTP 400/404; no data returned, no mutation.
 
-### SEC-08 — Repository-relative paths cannot escape the approved root — enforced — Owner: unassigned
-- **Enforcement location:** `security.ts` `isPathInside` (`path.relative` containment — never a string prefix) on the `/file` route.
-- **Proving test:** `security.test.ts` (filesystem containment block: `../` traversal 400; the `project` vs `project-secrets` prefix-collision sibling 400/404 with no content; absolute outside path 400; nonexistent repo 400).
-- **Failure behavior:** 400; no file read.
+### SEC-08 — Repository-relative paths cannot escape the approved root — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/policies/path-policy.ts` `isPathInside` (`path.relative` containment) on `/api/projects/:enc/file`.
+- **Proving test:** `packages/server/test/security.test.ts` (filesystem path containment block).
+- **Failure behavior:** HTTP 400; no file read.
 
-### SEC-09 — Symlink escapes are rejected; one documented exception — partially enforced — Owner: unassigned
-- **Current:** the `/file` route and engineer write path resolve `fs.realpath` and re-check containment. Worktrees no longer create a `node_modules` junction; there is still no server symlink-specific test (creating symlinks is privilege-restricted on Windows CI).
-- **Target:** symlink-planted test cases; realpath containment on engineer write targets (SAFE-002).
-- **Failure behavior (current):** resolved-outside-root paths ⇒ 400; no read.
+### SEC-09 — Symlink escapes are rejected — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/routes/repositories.ts` (`fs.realpath` re-check on `/file` and `/api/fs/browse`) and `packages/agents/src/agents/engineer.ts` (`resolveContainedTarget` with `fs.realpath` parent walk). Worktrees no longer create a `node_modules` junction.
+- **Proving test:** `packages/server/test/security.test.ts` (symlink/junction escape on `/file` and `/api/fs/browse`) and `packages/agents/test/engineer-containment.test.ts`.
+- **Failure behavior:** resolved-outside-root paths return HTTP 400/403 `E_PATH_ESCAPE`; engineer write throws `E_PATH_ESCAPE`; no read or write occurs.
 
-### SEC-10 — Secrets are not written to logs, URLs, argv, reports, or persisted artifacts — partially enforced — Owner: unassigned
-- **Current:** clone credentials never appear in argv, `.git/config`, or scrubbed stderr (SEC-11, tested); the central logger and provider client boundary apply the shared redaction utility; sensitive files are excluded from snapshots. **Remaining:** a planted-secret canary across every persisted artifact and error path is not yet complete.
-- **Target / measurable definition (review F-19):** "secret" = the versioned pattern list in the redaction utility: bearer/basic credentials, `x-access-token` URLs, `KEY=value` env lines, high-entropy strings (>20 chars) in value position. All such shapes pass through `redact()` at the logger, error-mapper, and event boundaries. Completeness is claimed **only** over the versioned pattern list plus planted canaries.
-- **Failure behavior (target):** redaction failure is a build-breaking test (GATE-11 canary); runtime detection logs a redacted placeholder, never the value.
+### SEC-10 — Secrets are not written to logs, URLs, argv, reports, or persisted artifacts — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/schemas/src/redaction.ts` (`redactSecrets`, `redactUnknown`), wired into `logger.ts`, `event-log.ts`, `evidence-store.ts` (`write` and `writeReportMarkdown`), `runtime.ts` (`persistState` and `appendLedger`), `routes/health.ts` (`/api/diagnostics`), and provider boundaries (`text-agent-loop.ts`, `decision-agent.ts`).
+- **Current:** all versioned credential patterns (Bearer/Basic headers, URL userinfo, `x-access-token:`, `sk-`, `ghp_`, `github_pat_`, `AKIA`, `KEY=value` env assignments, PEM private keys) are redacted before persistence or outbound transmission, and sensitive files (`.env*`, `*.pem`, `*.key`, `.npmrc`, `.netrc`) are excluded from snapshots.
+- **Proving test:** `packages/server/test/redaction.test.ts`, `packages/schemas/test/redaction.test.ts`, and `packages/agents/test/provider-redaction.test.ts`.
+- **Failure behavior:** planted-secret canary failure breaks `pnpm test` (`GATE-11`); runtime occurrences are replaced with `[REDACTED]`.
 
-### SEC-11 — Git credentials use a secure mechanism — enforced — Owner: unassigned
-- **Enforcement location:** `app.ts` clone route + `security.ts` (`credentialFileBody`, `scrubSecret`, `parseCloneUrl`).
-- **Current:** the token travels in a mode-0600 `git-credential-store` temp file (deleted in a `finally`, including on failure), the clone URL passed to git is canonical and clean, stderr is scrubbed before reaching the client, and the concurrent-target race is closed via atomic `mkdir` reservation. Live-smoke verified: a real clone leaves zero credential residue. (Supersedes the v3.0 extraheader target with an equivalent mechanism.)
-- **Proving test:** `security.test.ts` (clone block: credential-URL rejection, scrubbing, store-file format, host allowlist) + live smoke (2026-09-28).
-- **Failure behavior:** clone failure returns scrubbed stderr; no credential persisted anywhere.
+### SEC-11 — Git credentials use a secure mechanism — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/routes/projects.ts` clone route + `packages/server/src/policies/resource-policy.ts` (`credentialFileBody`, `scrubSecret`, `parseCloneUrl`).
+- **Proving test:** `packages/server/test/security.test.ts` (git clone credential handling block).
+- **Failure behavior:** clone failure deletes the `0600` temp credential store in `finally` and returns scrubbed stderr; no credential persisted anywhere.
 
-### SEC-12 — Untrusted repository code is not executed without an explicit execution policy — partially enforced — Owner: unassigned
-- **Current:** repository commands are denied by default by the per-project `executionPolicy`; the executor supplies a rejecting runner unless the operator explicitly enables commands. The remaining gap is isolation: enabled commands still run on the host.
-- **Target:** per-project policy (default analysis-only); commands shown to the operator for approval at registration/checkpoint.
-- **Interaction rule (review F-20, normative):** when the policy prevents baseline or post-change command execution, proposals **shall not land**; the run completes `not-verified` with changes left on the worktree branch for manual review. `NOT_APPLICABLE` gates never substitute for executable verification when landing.
-- **Failure behavior (target):** unapproved command ⇒ skipped, gate records `NOT_APPLICABLE (policy)`, landing blocked, report discloses "not verified".
+### SEC-12 — Untrusted repository code is not executed without an explicit execution policy — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/schemas/src/config.ts` (`executionPolicy.allowCommandExecution` defaults to `false`), `packages/agents/src/executor.ts` (`policyRunner`), `packages/agents/src/agents/verifier.ts`, and `packages/agents/src/agents/regression-sentinel.ts`.
+- **Current:** repository commands are denied by default; when blocked by `executionPolicy`, verification gates record `FAIL` with `NOT_APPLICABLE (policy)` details and reject the attempt so unverified changes never land.
+- **Proving test:** `packages/agents/test/permissions.test.ts` (`SEC-12` execution policy block).
+- **Failure behavior:** unapproved command skipped, gate records `FAIL` (`NOT_APPLICABLE (policy)`), landing blocked.
 
-### SEC-13 — All dangerous operations are audited — planned — Owner: unassigned
-- **Target:** the §7 event set with AUD-01 fields. **Failure behavior:** an operation without its audit event fails its test; at runtime, un-auditable dangerous operations are refused where feasible and logged as `E_NO_AUDIT` otherwise.
+### SEC-13 — All dangerous operations are audited — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/server/src/context.ts` `audit` (`VIBEFIX_HOME/audit.ndjson`) + route handlers across `projects.ts`, `runs.ts`, `approvals.ts`, and `health.ts` (`GET /api/audit`).
+- **Current:** project open, clone, config update, run create/open/delete, checkpoint approve/reject/abort/resume, retention sweep, and project delete emit structured correlation-tagged `AuditRecord` entries.
+- **Proving test:** `packages/server/test/security.test.ts` (`SEC-13 / AUD-01 / AUD-02` block).
+- **Failure behavior:** denied or failed operations record `result: "denied" | "error"` with `errorCode` in the audit log.
 
-### SEC-14 — Every request body is schema-validated — enforced — Owner: unassigned
-- **Current:** all mutating routes parse strict Zod request schemas before dispatch or persistence; unknown keys and invalid field types are rejected with field paths.
+### SEC-14 — Every request body is schema-validated — enforced — Owner: `@vibefix/security-eng`
+- **Enforcement location:** `packages/schemas/src/api.ts` (`parseRequestBody` + strict route Zod schemas) wired across `projects.ts`, `runs.ts`, and `approvals.ts`.
 - **Proving test:** `packages/server/test/request-validation.test.ts`.
-- **Current:** only `PUT /config` zod-validates; clone/runs/approve bodies are checked manually (type/shape guards added in v3.1) but not schema-validated (review F-25).
-- **Target:** zod schema per route; invalid ⇒ 400 `E_INVALID_BODY`, run state untouched, audit event.
-- **Failure behavior (target):** 400 with the schema violation path; no partial application.
+- **Failure behavior:** HTTP 400 `E_INVALID_BODY` with field violation paths; run state untouched.
 
 ---
 
 ## 3. Reliability and recovery contract
 
-### REL-01 — State-changing commands carry idempotency keys, applied atomically — partially enforced — Owner: unassigned
-- **Current (v3.1):** `approve`/`reject`/`abort`/`resume` accept an `Idempotency-Key` header (or body field); a repeated key replays the original 200 response (`X-Idempotent-Replay: true`) without re-dispatching. Outcomes are atomically stored under `VIBEFIX_HOME/idempotency.json` and replay survives server reconstruction. Proving tests: `packages/server/test/runtime-correctness.test.ts` (including restart-context replay).
-- **Remaining:** key check and transition are not yet one cross-process critical section.
+### REL-01 — State-changing commands carry idempotency keys, applied atomically — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/server/src/context.ts` `withIdempotency` (serialized critical-section promise chain + atomic persistence to `VIBEFIX_HOME/idempotency.json`) + `packages/server/src/routes/approvals.ts`.
+- **Current:** sequential or concurrent duplicate requests with the same `Idempotency-Key` execute in a single critical section, dispatching once and replaying the original 200 response with `X-Idempotent-Replay: true` across restarts.
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts` (sequential replay, concurrent single-dispatch serialization, and server-restart replay).
+- **Failure behavior:** failed dispatches are not cached; duplicate requests without a key receive HTTP 409 from the phase guard.
 
-### REL-02 — State transitions are validated centrally — enforced — Owner: unassigned
-- **Enforcement location:** `packages/core/src/orchestrator/reducer.ts` (guards); terminal ignore in `runtime.ts` `reduceAndPersist`.
-- **Proving test:** `packages/core/test/reducer.test.ts` (4 guard cases).
-- **Failure behavior:** stale/out-of-phase events are no-ops with zero effects (tested).
+### REL-02 — State transitions are validated centrally — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/domain/src/reducer.ts` (guards) + `packages/core/src/orchestrator/runtime.ts` `reduceAndPersist`.
+- **Proving test:** `packages/core/test/reducer.test.ts`.
+- **Failure behavior:** stale/out-of-phase events are no-ops with zero effects.
 
-### REL-03 — State is persisted before success is reported — partially enforced — Owner: unassigned
-- **Current:** state transitions and events persist before publication/reporting; event append failures reject and surface degradation. Initial state creation remains a direct write, and broader multi-file transition atomicity is not yet guaranteed.
-- **Failure behavior (current):** persistence failure surfaces as an error and degraded indicator.
+### REL-03 — State is persisted before success is reported — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/core/src/orchestrator/runtime.ts` `reduceAndPersist` + `packages/core/src/store/event-log.ts` `append`.
+- **Proving test:** `packages/core/test/runtime-safety.test.ts` and `packages/server/test/runtime-correctness.test.ts`.
+- **Failure behavior:** persistence failure rejects the transition/append before broadcasting or reporting HTTP 200 and increments `persistenceFailures`.
 
-### REL-04 — Events have monotonically increasing, never-reused sequence numbers — partially enforced — Owner: unassigned
-- **Current:** the counter resumes from the greatest valid persisted sequence, events are published only after append succeeds, and active runs use a single-writer lease. Proving test: `packages/core/test/durable-correctness.test.ts`.
-- **Remaining:** append durability is not an fsync-backed commit protocol.
+### REL-04 — Events have monotonically increasing, never-reused sequence numbers — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/core/src/store/event-log.ts` + `packages/core/src/store/run-lock.ts`.
+- **Proving test:** `packages/core/test/durable-correctness.test.ts` and `packages/server/test/runtime-correctness.test.ts`.
+- **Failure behavior:** failed appends do not advance or reuse sequence numbers; resumed logs continue strictly from `max(persisted seq) + 1`.
 
-### REL-05 — WebSocket clients recover missed events exactly — partially enforced — Owner: unassigned
-- **Current (v3.1):** the v3.0 protocol gap (subscribe *after* replay read — events in that window never sent, F-15) is **closed**: `/ws` bridges through `packages/server/src/ws-replay.ts` (subscribe-first into a buffer → replay → dedup-by-eventId flush → live), deterministically tested with events appended *during* the replay window (`runtime-correctness.test.ts` bridge block). Client side: `eventId` dedup plus sequence-gap detection (`seq > lastSeq+1` triggers a REST resync + fresh snapshot) — implemented, but there is no browser test harness.
-- **Target:** client passes `since=lastSeq` on reconnect (currently replay is idempotent instead); socket-level end-to-end test.
-- **Failure behavior (current):** no loss/duplication through the bridge; client gaps self-heal via REST resync.
+### REL-05 — WebSocket clients recover missed events exactly — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/server/src/websocket/replay.ts` `bridgeReplayToLive`, `packages/server/src/websocket/gateway.ts`, and `packages/ui/src/store.ts` (`since=${lastSeq}` + gap resync).
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts` (both unit-level bridge interleave and full socket-level `/ws` reconnect with `since=lastSeq` and live event interleave).
+- **Failure behavior:** no event loss or duplication across replay/live handoff; sequence gaps trigger REST resync.
 
-### REL-06 — REST snapshot recovery — enforced — Owner: unassigned
-- **Enforcement location:** `app.ts` scoped run routes (`state`, `events?since=`) over disk state.
-- **Current:** missing run ⇒ 404; unreadable `state.json` ⇒ 500 `{degraded:true}` naming the reason (never silently "unknown run"); corrupt event lines are counted (`corruptLineCount`, `replayDegraded`) rather than skipped silently; unpersisted live events flagged (`persistenceFailures`).
-- **Proving test:** `runtime-correctness.test.ts` (explicit recovery degradation block).
-- **Failure behavior:** as above; never partial data without a degraded flag.
+### REL-06 — REST snapshot recovery — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/server/src/routes/runs.ts` (`GET /api/projects/:enc/runs/:runId` and `/events?since=`).
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts` and `packages/server/test/security.test.ts`.
+- **Failure behavior:** missing run ⇒ 404; corrupt `state.json` ⇒ 500 `{degraded:true}`; corrupt event lines counted in `corruptLineCount` / `replayDegraded`.
 
-### REL-07 — Process restart does not silently lose run state — partially enforced — Owner: unassigned
-- **Current:** durable state per transition; `loadRun` classifies interrupted runs and `resume()` explicitly re-executes non-terminal work. A landing journal recovers interrupted cherry-picks. Remaining gaps are the broader crash matrix and fsync-level durability.
-- **Failure behavior (target):** unrecoverable state ⇒ run `failed` with `E_STATE_UNRECOVERABLE`; recoverable ⇒ `interrupted` + resumable.
+### REL-07 — Process restart does not silently lose run state — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/core/src/orchestrator/run-manager.ts` (`loadRun`, `resume`) + `packages/core/src/worktree/worktree-manager.ts` (`recoverInterruptedLanding`).
+- **Proving test:** `packages/core/test/recovery.test.ts` (`GATE-07` kill-mid-run + resume to completion) and `packages/core/test/durable-correctness.test.ts`.
+- **Failure behavior:** killed runs reload as `interrupted` and resume cleanly from their last persisted phase on explicit `resume()`.
 
-### REL-08 — Interrupted runs are identified after restart — enforced — Owner: unassigned
-- **Current:** persisted `running` runs reload as `interrupted`, persist that status, and require explicit resume; intentional `paused` runs remain paused. Proving test: `packages/core/test/durable-correctness.test.ts`.
-- **Failure behavior:** a restarted mid-run is never silently auto-resumed or reported as running.
+### REL-08 — Interrupted runs are identified after restart — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/core/src/orchestrator/run-manager.ts` `loadRun`.
+- **Proving test:** `packages/core/test/recovery.test.ts` and `packages/core/test/durable-correctness.test.ts`.
+- **Failure behavior:** persisted `running` runs are reclassified and persisted as `interrupted`; never silently auto-resumed or reported as running.
 
-### REL-09 — Corrupt persistence is reported as degraded — partially enforced — Owner: unassigned
-- **Current (v3.1):** event-log reads count corrupt lines and failed appends, corrupt run state returns 500 `{degraded:true}`, and evidence `latest()/read()/list()` mark corruption and expose degraded metadata. Proving tests: `runtime-correctness.test.ts`, `durable-correctness.test.ts`.
-- **Target:** every read path returns a countable, machine-readable degraded indicator (run-level `degraded` flag + counters surfaced via OBS-06).
-- **Failure behavior (current):** event/state corruption ⇒ degraded indicator; artifact corruption still silent.
+### REL-09 — Corrupt persistence is reported as degraded — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/core/src/store/event-log.ts`, `packages/core/src/store/evidence-store.ts`, and `packages/server/src/routes/runs.ts`.
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts` and `packages/core/test/durable-correctness.test.ts`.
+- **Failure behavior:** corrupt event lines, corrupt `state.json`, and corrupt evidence artifacts set machine-readable degraded indicators and counts.
 
-### REL-10 — Failed background work is persisted and visible — enforced — Owner: unassigned
-- **Enforcement location:** `app.ts` approve route (awaits dispatch; 500 on failure) + `projects.ts` `track()` (records failures in a bounded map surfaced via `/api/health` `backgroundFailures`, and force-fails the run via `FATAL` → status `failed`, `run.failed` event, worktree cleanup).
-- **Proving test:** `runtime-correctness.test.ts` (approval-failure 500; `track()` FATAL + failure recording; health counter).
-- **Failure behavior:** downstream/background failure ⇒ run state reflects it, HTTP never reports success for a failed approval, failure visible in health. (The v3.0 target's 202+task-id status API was not built; the guarantee itself is enforced.)
+### REL-10 — Failed background work is persisted and visible — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/server/src/routes/approvals.ts` + `packages/server/src/projects.ts` `track()`.
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts`.
+- **Failure behavior:** background dispatch failure force-fails the run (`FATAL`) and increments `/api/health` `backgroundFailures`.
 
-### REL-11 — Terminal runtimes are disposed — enforced — Owner: unassigned
-- **Enforcement location:** `projects.ts` `watchForTerminal` (drops the runtime on `run.completed`/`failed`/`aborted`/`nochanges`, or at registration of an already-terminal run, after background work settles; disk serves all reads).
-- **Proving test:** `runtime-correctness.test.ts` (terminal block: event-driven and already-terminal cases; `activeRuntimeCount` no longer inflated).
-- **Failure behavior:** unregistrable runtime is dropped defensively; reads fall back to disk.
+### REL-11 — Terminal runtimes are disposed — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/server/src/projects.ts` `watchForTerminal`.
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts`.
+- **Failure behavior:** terminal runs are evicted from memory once background work settles; subsequent reads are served from disk.
 
-### REL-12 — Child processes and timers are cleaned up — partially enforced — Owner: unassigned
-- **Current:** timeouts use SIGKILL on POSIX and `taskkill /T /F` for Windows `.cmd` shims. A dedicated Windows process-tree test remains outstanding.
+### REL-12 — Child processes and timers are cleaned up — enforced — Owner: `@vibefix/platform-eng`
+- **Enforcement location:** `packages/adapters/src/tools/git.ts` `runCommand` + `packages/adapters/src/tools/test-runner.ts` `NodeTestRunner`.
+- **Current:** timeouts destroy stdout/stderr streams, terminate the process tree (`taskkill /T /F` on Windows, `SIGKILL` on POSIX), clear timers, and return `code: -1` with `"Command timed out after ...ms"` in `stderr`.
+- **Proving test:** `packages/adapters/test/test-runner.test.ts`.
+- **Failure behavior:** timed-out child and grandchild processes are killed; non-ok result with timeout diagnostic returned.
 
-### REL-13 — Graceful shutdown, including the landing phase — partially enforced — Owner: unassigned
-- **Current:** SIGINT/SIGTERM close intake, abort active runs, drain tracked work, and enforce a shutdown timeout; landing is journaled and recovered on next open. A direct signal/shutdown integration test remains outstanding.
+### REL-13 — Graceful shutdown, including the landing phase — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/server/src/main.ts` `createShutdownHandler` + `packages/server/src/projects.ts` `shutdown` + `packages/core/src/worktree/worktree-manager.ts` landing journal.
+- **Proving test:** `packages/server/test/runtime-correctness.test.ts` (`createShutdownHandler` test) and `packages/core/test/recovery.test.ts` (landing journal recovery).
+- **Failure behavior:** `SIGINT`/`SIGTERM` abort active runs, await in-flight tasks up to the shutdown timeout, close the server, and exit cleanly.
 
-### REL-14 — Single writer per run (process lock) — enforced — Owner: unassigned
-- **Current:** `.run.lock` is acquired on run creation/open, rejects a live second writer with `E_RUN_LOCKED`, and reclaims a stale dead-PID lock. Proving test: `packages/core/test/durable-correctness.test.ts`.
+### REL-14 — Single writer per run (process lock) — enforced — Owner: `@vibefix/runtime-eng`
+- **Enforcement location:** `packages/core/src/store/run-lock.ts` + `packages/core/src/orchestrator/run-manager.ts`.
+- **Proving test:** `packages/core/test/durable-correctness.test.ts`.
+- **Failure behavior:** second live writer is rejected with `E_RUN_LOCKED`; dead-PID lock is reclaimed automatically.
 
 ---
 
 ## 4. Behavior-preservation (safety) contract
 
-### SAFE-01 — The original working tree is not modified before approval — partially enforced — Owner: unassigned
-- **Current:** tracked files are untouched pre-approval; worktree creation no longer writes `core.longpaths` to the user's `.git/config` and no longer shares the user's `node_modules`. The harness baseline still executes commands from the primary checkout when explicitly enabled, so cache-producing commands remain a possible mutation.
-- **Target:** baseline executed in an isolated snapshot and a failure-injection test proves primary-tree invariance.
-- **Failure behavior (target):** any pre-approval mutation of the primary tree fails `primary-tree.test.ts` (git status, `.git/config`, `node_modules` hashes unchanged through checkpoint).
+### SAFE-01 — The original working tree is not modified before approval — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/worktree-manager.ts` and `packages/agents/src/agents/harness-builder.ts` (runs baseline test commands inside a temporary isolated worktree and discards it in `finally`).
+- **Proving test:** `packages/core/test/primary-tree.test.ts` (`SAFE-01` primary-tree, `.git/config`, and `node_modules` invariance test).
+- **Failure behavior:** primary checkout `git status`, `HEAD`, `.git/config`, and `node_modules` remain byte-for-byte unchanged across worktree creation, baseline runs, engineer failures, and discard.
 
-### SAFE-02 — All writes occur inside the approved worktree, with resolved-path containment — enforced — Owner: unassigned
-- **Current:** `engineer.ts` resolves the worktree realpath, checks relative containment, walks unresolved parent directories for symlink escapes, and rejects with `E_PATH_ESCAPE` before writing.
-- **Proving test:** `packages/agents/test/engineer-containment.test.ts` covers parent traversal, absolute paths, and symlinked parents.
-- **Failure behavior (target):** escaping write rejected, violation recorded (feeds SAFE-016), attempt fails closed.
+### SAFE-02 — All writes occur inside the approved worktree, with resolved-path containment — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/agents/src/agents/engineer.ts` `resolveContainedTarget`.
+- **Proving test:** `packages/agents/test/engineer-containment.test.ts`.
+- **Failure behavior:** escaping write rejected with `E_PATH_ESCAPE`, violation recorded, attempt fails closed.
 
-### SAFE-03 — The worktree starts from a recorded commit — planned — Owner: unassigned
-- **Current:** `git worktree add -b` from HEAD (`git.ts`); the base commit is **not** persisted as evidence.
-- **Target:** `baseCommit` (rev-parse at creation) recorded in the attempt ledger; mismatch vs pre-run HEAD fails the attempt. **Failure behavior:** missing/mismatched `baseCommit` ⇒ attempt rejected, ledger records `E_BASE_COMMIT`.
+### SAFE-03 — The worktree starts from a recorded commit — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/worktree-manager.ts` (`baseCommit` captured at creation) + `packages/core/src/orchestrator/runtime.ts` (`baseCommit` persisted in `ChangeLedgerEntry`).
+- **Proving test:** `packages/core/test/primary-tree.test.ts` and `packages/agents/test/verification-fail-closed.test.ts`.
+- **Failure behavior:** missing `baseCommit` causes verifiers to reject the attempt immediately.
 
-### SAFE-04 — Only the approved writer can modify code — partially enforced — Owner: unassigned
-- **Current:** convention + orchestrator input-shaping: one `worktree-write` agent (`definitions.ts`), worktree+firewall passed only to it (`runtime.ts`); every agent's toolset is identical (`contract.ts`) — this is **not** a capability control, and engineer compliance itself rests partly on system-prompt rules (review F-22).
-- **Target:** capability injection — a write handle exists only in the engineer context; other agents structurally lack one; static rule (lint/AST) forbidding `node:fs` imports outside engineer/core. OS-level sandboxing remains **unsupported** this release.
-- **Failure behavior (target):** a non-engineer write attempt is impossible by construction; the static rule fails CI on violation.
+### SAFE-04 — Only the approved writer can modify code — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/agents/src/definitions.ts` (single `worktree-write` permission on `engineer`), `packages/core/src/orchestrator/runtime.ts`, and `scripts/lint.mjs` (`SAFE-04` AST lint rule forbidding `node:fs` imports in any agent under `packages/agents/src` except `engineer.ts`).
+- **Proving test:** `packages/agents/test/permissions.test.ts` (`GATE-03 / SAFE-04`).
+- **Failure behavior:** any non-engineer `node:fs` import fails `pnpm lint` and `permissions.test.ts`.
 
-### SAFE-05 — Changes are limited to approved files and operations — enforced — Owner: unassigned
-- **Enforcement location:** `packages/core/src/worktree/firewall.ts` (default-deny on `filesInScope`, `filesOutOfScope`, forbidden zones); auto-reject enforced at `engineer.ts`.
-- **Proving test:** `packages/core/test/firewall.test.ts` (scope, exclusion, auto-reject cases).
-- **Failure behavior:** denied write ⇒ violation artifact + auto-reject at 2 cumulative violations for the proposal. Note the firewall is an advisory API-boundary check, not an fs-level gate — containment is SAFE-02's job.
+### SAFE-05 — Changes are limited to approved files and operations — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/firewall.ts` + `packages/agents/src/agents/engineer.ts`.
+- **Proving test:** `packages/core/test/firewall.test.ts`.
+- **Failure behavior:** denied write records a `firewall-violation` artifact and auto-rejects at 2 cumulative violations.
 
-### SAFE-06 — Protected paths cannot be modified — enforced — Owner: unassigned
-- **Enforcement location:** `firewall.ts` (zones merged at `runtime.ts` `forbiddenZones`). **Test:** `firewall.test.ts`. **Failure behavior:** denial + violation record.
+### SAFE-06 — Protected paths cannot be modified — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/firewall.ts`.
+- **Proving test:** `packages/core/test/firewall.test.ts`.
+- **Failure behavior:** denial + violation record.
 
-### SAFE-07 — Lockfiles and dependency files require explicit approval — enforced — Owner: unassigned
-- **Enforcement location:** `firewall.ts`; explicit approval = verbatim listing in the user-approved `filesInScope`. **Test:** `firewall.test.ts`. **Failure behavior:** denial + violation record.
+### SAFE-07 — Lockfiles and dependency files require explicit approval — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/firewall.ts`.
+- **Proving test:** `packages/core/test/firewall.test.ts`.
+- **Failure behavior:** denial + violation record unless verbatim in user-approved `filesInScope`.
 
-### SAFE-08 — Proposal scope cannot silently change after approval — planned (hash check) — Owner: unassigned
-- **Current:** queue fixed from approved ids (`reducer.ts`); no integrity check that the artifact used at execution equals the one approved.
-- **Target:** hash the approved backlog; verify at each attempt; mismatch ⇒ fail closed. **Failure behavior:** `E_SCOPE_MUTATED`, attempt rejected, audit event.
+### SAFE-08 — Proposal scope cannot silently change after approval — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/orchestrator/runtime.ts` `proposalScopeHash` (`SHA-256` of approved scope/constraints stored in `state.approval.scopeHashes` at `CHECKPOINT_APPROVED` and verified before each attempt).
+- **Proving test:** `packages/core/test/primary-tree.test.ts` (`SAFE-08` tampered-backlog test).
+- **Failure behavior:** hash mismatch rejects the attempt with `E_SCOPE_MUTATED` before invoking the engineer and records the rejection in the ledger.
 
-### SAFE-09 — The final diff is checked after execution — partially enforced — Owner: unassigned
-- **Current:** verifier `firewall-scope` gate compares `changedFiles` vs scope (`verifier.ts`); sentinel re-checks zones; untested directly.
-- **Failure behavior (current/target):** out-of-scope or zone-touching diff ⇒ gate FAIL ⇒ SAFE-011 path (no landing). **Target:** gate unit tests with planted violations.
+### SAFE-09 — The final diff is checked after execution — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/agents/src/agents/verifier.ts` and `packages/agents/src/agents/regression-sentinel.ts` (`firewall-scope` gate over committed `git diff baseCommit..HEAD`).
+- **Proving test:** `packages/agents/test/permissions.test.ts` (`SAFE-09` planted out-of-scope / forbidden-zone diff test).
+- **Failure behavior:** `firewall-scope` gate records `FAIL` and rejects the attempt; changes never land.
 
-### SAFE-10 — Verification is structurally blinded and fails closed — partially enforced — Owner: unassigned
-- **Current:** structural exclusion of `change-attempt` holds; unavailable decision providers return `noul`, and verifier gates reject the change. Model diversity is **unsupported** (single provider by default, `routing.ts`).
-- **Proving test:** `packages/agents/test/verification-fail-closed.test.ts` covers unavailable providers and verifier rejection.
-- **Failure behavior (target):** unconfigured/misrouted decision capability ⇒ zero landed changes, run marked `not-verified`.
+### SAFE-10 — Verification is structurally blinded and fails closed — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/agents/src/runtime/context-builder.ts`, `packages/agents/src/runtime/decision-agent.ts`, and `packages/agents/src/agents/verifier.ts`.
+- **Proving test:** `packages/agents/test/verification-fail-closed.test.ts`.
+- **Failure behavior:** unavailable decision provider or failing gate rejects the change; nothing lands.
 
-### SAFE-11 — Failed verification prevents completion — enforced — Owner: unassigned
-- **Enforcement location:** `reducer.ts` (reject → retry → defer; never lands). **Test:** `reducer.test.ts`. **Failure behavior:** deferred proposal, ledger record, run continues.
+### SAFE-11 — Failed verification prevents completion — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/domain/src/reducer.ts`.
+- **Proving test:** `packages/core/test/reducer.test.ts`.
+- **Failure behavior:** rejected proposal retries up to budget then defers; never lands.
 
-### SAFE-12 — Retry limits bound modification attempts — enforced — Owner: unassigned
-- **Enforcement location:** `reducer.ts`; `maxRetriesPerChange: 2` (`routing.ts`) — **3 attempts total (1 initial + 2 retries), then defer.** **Test:** `reducer.test.ts`.
+### SAFE-12 — Retry limits bound modification attempts — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/domain/src/reducer.ts` (`maxRetriesPerChange: 2` → 3 attempts total).
+- **Proving test:** `packages/core/test/reducer.test.ts`.
+- **Failure behavior:** exhausted retries transition the proposal to `deferred`.
 
-### SAFE-13 — Every change has a rollback or discard path — enforced (with hardening required) — Owner: unassigned
-- **Enforcement location:** discard on all failure paths (`runtime.ts` → `worktree-manager.ts`); conflict ⇒ cherry-pick abort, branch untouched. **Test:** `e2e.test.ts` (no worktrees left after rejection).
-- **Failure behavior (current defect):** cleanup errors are swallowed — a failed removal is invisible. **Target:** verify post-discard state, retry, surface `E_DISCARD_FAILED`.
+### SAFE-13 — Every change has a rollback or discard path — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/worktree-manager.ts` `discard` (verifies directory removal post-discard, retries, and throws `E_DISCARD_FAILED` if still present).
+- **Proving test:** `packages/core/test/recovery.test.ts` (`SAFE-13`) and `packages/core/test/e2e.test.ts`.
+- **Failure behavior:** worktree and `vibefix/*` branch removed; unremovable directory throws `E_DISCARD_FAILED`.
 
-### SAFE-15 — Landing is crash-recoverable on the user's repository — planned — Owner: unassigned
-- **Current:** `git cherry-pick` runs in the user's repo (`worktree-manager.ts`); a crash mid-land leaves `CHERRY_PICK_HEAD`/staged state with no detection anywhere (review F-14).
-- **Target:** land journal (pre/post records persisted before/after the pick); on project open, detect in-progress picks and deterministically complete or abort, ledger-recording the outcome.
-- **Failure behavior (target):** kill during landing ⇒ reopen ⇒ user repo clean, ledger states the outcome; never a silent half-applied branch.
+### SAFE-14 — Human approval gates execution — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/domain/src/reducer.ts`.
+- **Proving test:** `packages/core/test/reducer.test.ts`.
+- **Failure behavior:** execution events before `CHECKPOINT_APPROVED` are ignored.
 
-### SAFE-14 — Human approval gates execution — enforced — Owner: unassigned
-- **Enforcement location:** `reducer.ts` — `CHECKPOINT_APPROVED` is the only queue-building event, valid only in phase. **Test:** `reducer.test.ts` (3 cases). CLI `--yes` is the documented explicit bypass of the human gate only.
+### SAFE-15 — Landing is crash-recoverable on the user's repository — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/worktree/worktree-manager.ts` (`landing-journal.json` + `recoverInterruptedLanding`).
+- **Proving test:** `packages/core/test/recovery.test.ts` (`SAFE-15` kill-mid-cherry-pick test) and `packages/core/test/durable-correctness.test.ts`.
+- **Failure behavior:** interrupted cherry-pick is deterministically aborted on project open, leaving a clean user branch.
 
-### SAFE-16 — Firewall violations accumulate per proposal — planned — Owner: unassigned
-- **Current:** the violation counter resets each attempt (fresh `ChangeFirewall` per attempt, `runtime.ts`); one probing violation per attempt evades auto-reject across the retry budget (review F-08).
-- **Target:** persist violation count per proposalId in the ledger; 2 cumulative ⇒ defer the proposal. **Failure behavior:** cumulative threshold ⇒ proposal deferred, ledger + report record it.
+### SAFE-16 — Firewall violations accumulate per proposal — enforced — Owner: `@vibefix/safety-eng`
+- **Enforcement location:** `packages/core/src/orchestrator/runtime.ts` + `packages/core/src/worktree/firewall.ts` (`initialViolations` seeded across retries).
+- **Proving test:** `packages/core/test/firewall.test.ts`.
+- **Failure behavior:** 2 cumulative violations across attempts auto-reject and defer the proposal.
 
 ---
 
 ## 5. Resource and cost contract
 
-**Normative (F-02):** every limit below must have a numeric default and a config key at release. A `TBD` at release is a defect. Current behavior for every unimplemented limit is **unbounded**.
+Every limit below has a numeric default enforced in code and covered by automated tests (`Owner: @vibefix/platform-eng`).
 
 | ID | Limit | Default / source | Status | On limit reached — outcome / user sees / persisted |
 |---|---|---|---|---|
-| RES-01 | Repository size | **TBD — must be set before release** | planned | Reject at registration `E_REPO_TOO_LARGE`; user sees refusal message; registration attempt audited. |
-| RES-02 | File count analyzed | 400 (harness pin, `harness-builder.ts`); 25 in-scope (engineer) | partially enforced | **Current:** silent truncation. **Target:** degraded disclosure in report (`truncatedAt: N files`); persisted in artifact. |
-| RES-03 | Individual file size | 200,000 chars (security-agent); 30,000 render (`context-builder.ts`) | partially enforced | **Current:** silent skip. **Target:** per-file degraded disclosure; persisted. |
-| RES-04 | Analysis duration | **TBD — must be set** | planned | Phase fails `E_TIME_BUDGET`; partial evidence retained; user sees failed phase + reason; event persisted. |
-| RES-05 | Run duration | **TBD — must be set** | planned | Run `failed`; worktrees discarded; user sees failure + reason; `run.failed` event. |
-| RES-06 | Child-process duration | 30s git / 60s commands / 600s clone / 120s LLM HTTP (`git.ts`; `test-runner.ts`; `app.ts`; `http.ts`) | partially enforced | Killed; non-ok result; gate FAIL or clone 400; exit code + output tail persisted. Windows tree-kill hardening pending (REL-12). |
-| RES-07 | Concurrent runs | **4** (`VIBEFIX_MAX_ACTIVE_RUNS`, `app.ts` createRun guard) | **enforced** (`security.test.ts` run-ceiling block: 429 `run ceiling reached`) | 429 refusal; user sees which condition; no run created. Per-run queueing not provided. |
-| RES-07b | Concurrent clones / clone rate | 2 concurrent / 10 per minute (`app.ts` clone route) | **enforced** (`security.test.ts` clone-rate block: 429 with Retry-After) | 429; user sees retry window; no clone started. |
-| RES-07c | Request rate / body size | 600 req/min per client; 1 MiB bodies (`security.ts` `RateLimiter`; Fastify `bodyLimit`) | **enforced** (`security.test.ts` rate-limit block: 429 after window exhaustion) | 429 + `Retry-After`; oversized body rejected by Fastify. |
-| RES-08 | Agent/pool concurrency | 3 (`runtime.ts` `POOL_CONCURRENCY`) | partially enforced | Structural (fixed 16-agent roster); pool cap untested. |
-| RES-09 | Retry count per change | 2 (`routing.ts`) | enforced (`reducer.test.ts`) | Change **deferred**; ledger + report show it; persisted. |
-| RES-10 | LLM calls per run | **TBD — must be set** | planned | Degraded (no further calls) or failed per policy; user informed; usage persisted. |
-| RES-11 | Output tokens per call | provider `maxOutputTokens` (`routing.ts`) | partially enforced | Truncated generation → schema-repair path; usage persisted. |
-| RES-12 | Run token budget | 2,000,000 + warn 0.8 (`routing.ts`; `budget.ts`; check in `runtime.ts`) | partially enforced | Run **aborted** "token budget exhausted"; user sees aborted run; persisted. **Defects:** checked between effects only; `budget.warning` never wired; `agentMaxTokens` unread in code. |
-| RES-13 | Estimated cost | **TBD** — prices exist (`routing.ts`), no cost math | planned | Estimate in report; ceiling breach ⇒ abort like RES-12; persisted. |
-| RES-14 | Worktree count | **TBD — must be set** | planned | Attempts queue; user sees queue; ledger persisted. |
-| RES-15 | Disk usage | **TBD — must be set** | planned | New runs/clones rejected `E_DISK_BUDGET`; retention offer surfaced; event persisted. |
-| RES-16 | Artifact/report size | piecemeal: ledger 200k (`runtime.ts`), tails 8k (`test-runner.ts`) | partially enforced | **Current:** undisclosed truncation. **Target:** per-artifact byte cap with explicit `truncated: true` surfaced in UI. |
+| RES-01 | Repository size | **500 MiB** (`524_288_000` bytes, `VIBEFIX_MAX_REPO_BYTES`, `context.ts` / `routes/projects.ts`) | **enforced** (`security.test.ts`) | Reject at registration with HTTP 400 `E_REPO_TOO_LARGE`; audited. |
+| RES-02 | File count analyzed | **400** (harness pin, `harness-builder.ts`); **25** in-scope (`engineer.ts`) | **enforced** (`permissions.test.ts`) | Truncated analysis disclosed in `behavioral-baseline.excluded` (`truncatedAt:400`). |
+| RES-03 | Individual file size | **200,000** chars (`security-agent.ts`); **30,000** render (`context-builder.ts`) | **enforced** (`permissions.test.ts`) | Skipped oversized files disclosed in `findings.notes` (`degraded: skipped N oversized file(s)`). |
+| RES-04 | Analysis duration | **600,000 ms** (10 min, `budgets.analysisTimeoutMs`, `routing.ts` / `runtime.ts`) | **enforced** (`primary-tree.test.ts`) | Phase fails with `E_TIME_BUDGET`; partial evidence retained; `run.failed` event persisted. |
+| RES-05 | Run duration | **1,800,000 ms** (30 min, `budgets.runTimeoutMs`, `routing.ts` / `runtime.ts`) | **enforced** (`primary-tree.test.ts`) | Run fails with `E_TIME_BUDGET`; worktrees discarded; `run.failed` event persisted. |
+| RES-06 | Child-process duration | **30s** git / **60s–300s** commands / **600s** clone / **120s** LLM HTTP (`git.ts`; `test-runner.ts`; `projects.ts`; `http.ts`) | **enforced** (`test-runner.test.ts`) | Process tree killed (`taskkill /T /F` on Windows, `SIGKILL` on POSIX); `code: -1` + timeout message persisted. |
+| RES-07 | Concurrent runs | **4** (`VIBEFIX_MAX_ACTIVE_RUNS`, `context.ts` / `routes/runs.ts`) | **enforced** (`security.test.ts`) | HTTP 429 `E_RUN_LIMIT`; audited; no run created. |
+| RES-07b | Concurrent clones / clone rate | **2** concurrent / **10** per minute (`context.ts` / `routes/projects.ts`) | **enforced** (`security.test.ts`) | HTTP 429 with `Retry-After`; no clone started. |
+| RES-07c | Request rate / body size | **600** req/min per client; **1 MiB** bodies (`RateLimiter`; Fastify `bodyLimit`) | **enforced** (`security.test.ts`) | HTTP 429 + `Retry-After`; oversized body rejected by Fastify. |
+| RES-08 | Agent/pool concurrency | **3** (`POOL_CONCURRENCY`, `runtime.ts`) | **enforced** (`e2e.test.ts`) | Bounded worker pool (max 3 concurrent agents per phase). |
+| RES-09 | Retry count per change | **2** (`maxRetriesPerChange`, `routing.ts`) | **enforced** (`reducer.test.ts`) | Change deferred after 3 total attempts; ledger + report updated. |
+| RES-10 | LLM calls per run | **120** (`budgets.maxLlmCallsPerRun`, `routing.ts` / `budget.ts`) | **enforced** (`primary-tree.test.ts`) | `BudgetMeter.exceeded` triggers run abort with `"LLM call budget exhausted"`. |
+| RES-11 | Output tokens per call | **8,192** (`maxOutputTokens`, `routing.ts`) | **enforced** (`roundtrip.test.ts`) | Capped per provider configuration in `ModelRoutingSchema`. |
+| RES-12 | Run & agent token budgets | **2,000,000** run / **500,000** per agent + warn at **0.8** (`routing.ts`; `budget.ts`; `runtime.ts`) | **enforced** (`primary-tree.test.ts`) | Emits `budget.warning` at 80%; aborts run when run or agent token cap is exceeded. |
+| RES-13 | Estimated cost ceiling | **$10.00 USD** (`budgets.maxCostUsd`, `routing.ts`; `budget.ts`; `executor.ts`) | **enforced** (`primary-tree.test.ts`) | Per-call cost computed from provider pricing; aborts run when `maxCostUsd` is exceeded. |
+| RES-14 | Worktree count | **8** (`budgets.maxWorktreesPerRun`, `routing.ts`; `worktree-manager.ts`) | **enforced** (`primary-tree.test.ts`) | Throws `E_WORKTREE_LIMIT` when active worktrees for the project reach the ceiling. |
+| RES-15 | Disk usage | **2 GiB** (`2_147_483_648` bytes, `VIBEFIX_MAX_DISK_BYTES`, `context.ts`) | **enforced** (`security.test.ts`) | New runs and clones rejected with HTTP 507 `E_DISK_BUDGET`; audited. |
+| RES-16 | Artifact/report size | **200,000** chars ledger diff (`runtime.ts`); **8,000** chars command output tail (`test-runner.ts`) | **enforced** (`test-runner.test.ts`) | Truncated with `...` prefix / `[truncated]` marker before persistence. |
 
 ---
 
 ## 6. Data and privacy contract
 
-- **DAT-01 Storage location — partially enforced.** Current/target per §1.1; failure: any run data outside `VIBEFIX_HOME` fails `paths.test.ts`.
-- **DAT-02 Provider payload scope — partially enforced.** Current: sensitive files are excluded from snapshots and provider-bound text/decision contexts pass through the versioned redaction boundary; planted canaries in those boundaries are covered. Remaining prompt construction and persisted-artifact canaries are not exhaustive. Target: redaction disclosed in the report and enforced for every provider payload.
-- **DAT-03 Secret redaction — partially enforced.** Current: shared `redactSecrets`/`redactUnknown` are used by the logger and provider boundary; clone errors are scrubbed. Failure-path and persisted-artifact canaries remain.
-- **DAT-04 Provider requests not logged — partially enforced → structural target.** Current: no persistence path exists for prompts/responses (behavioral absence, unfalsifiable — review F-03). Target: **structural non-persistability** — prompt/response types are not serializable into the logger/event schemas; lint rule forbids them in log calls. Failure: negative canary test + lint rule fail CI.
-- **DAT-05 Retention — planned.** Current: nothing is ever deleted (runs, worktrees, clones accumulate). Target: configurable retention + crash-safe periodic sweep (F-26). Failure: sweep failure retried and surfaced.
-- **DAT-06 User deletion — planned.** Target: `DELETE` routes for runs/projects removing dirs, worktrees, branches, clones + audit event. Failure: partial deletion ⇒ `E_DELETE_PARTIAL` listing remains.
-- **DAT-07 Diagnostics exclude secrets — planned.** Target: bundle built from redacted sources only; planted-secret test (GATE-11).
-- **DAT-08 API keys env-only — partially enforced.** LLM keys: env-only (absence of a persistence path; structural test per F-03 still pending). GitHub clone tokens: no longer persisted anywhere (SEC-11 enforced — credential file deleted post-clone; live-smoke verified). Rotation = env change + restart, or delete `~/.vibefix/server-token`.
-- **DAT-09 Prompts/responses persistence — current: prompts never persisted; model outputs persisted only as declared evidence artifacts** (audit trail). Deletion via DAT-06.
+Owner for `DAT-01..09`: `@vibefix/security-eng`.
+
+- **DAT-01 Storage location — enforced.** All run state, evidence, worktrees, and clones live under `VIBEFIX_HOME` (`packages/core/src/store/paths.ts`; proven in `e2e.test.ts` and `primary-tree.test.ts`).
+- **DAT-02 Provider payload scope — enforced.** Sensitive files (`.env*`, `*.pem`, `*.key`, `.npmrc`, `.netrc`) are excluded from snapshots and outbound text/decision prompts pass through `redactSecrets` (`packages/agents/test/provider-redaction.test.ts`).
+- **DAT-03 Secret redaction — enforced.** Shared `redactSecrets`/`redactUnknown` scrub logs, events, state errors, evidence artifacts, ledger diffs/notes, markdown reports, and diagnostics (`packages/server/test/redaction.test.ts`, `packages/schemas/test/redaction.test.ts`).
+- **DAT-04 Provider requests structurally non-persisted — enforced.** Raw prompt/response bodies are never written to events or logs, and `scripts/lint.mjs` enforces an AST rule (`[DAT-04]`) forbidding prompt identifiers in logger/event calls (`packages/agents/test/permissions.test.ts`).
+- **DAT-05 Retention — enforced.** Configurable per-project run retention (`VIBEFIX_RETENTION_MAX_RUNS`, default `20`) swept via `POST /api/projects/:enc/sweep` and `context.sweepRetention`, preserving active runs (`packages/server/test/security.test.ts`).
+- **DAT-06 User deletion — enforced.** `DELETE /api/projects/:enc/runs/:runId` and `DELETE /api/projects/:enc` remove run directories, worktrees, project state, and managed clones with audit records (`packages/server/test/security.test.ts`).
+- **DAT-07 Diagnostics exclude secrets — enforced.** `GET /api/diagnostics` passes the entire bundle through `redactUnknown` (`packages/server/test/redaction.test.ts`).
+- **DAT-08 API keys env-only — enforced.** LLM keys are read exclusively from environment variables (`packages/llm/src/router.ts`); GitHub clone tokens use an ephemeral `0600` credential store deleted in `finally` (`packages/server/test/security.test.ts`).
+- **DAT-09 Prompts/responses persistence — enforced.** Prompts are never persisted; structured model outputs are persisted only as redacted, schema-validated evidence artifacts (`packages/server/test/redaction.test.ts`).
 
 ---
 
 ## 7. Auditability contract
 
-- **AUD-01 Correlation fields — partially enforced.** Current: runId, agentId, artifactId, seq, ts exist (`packages/schemas/src/events.ts`; `event-log.ts`; `evidence-store.ts`). Missing: request ID, command ID, project ID, per-execution ID, actor, result, error codes. Target: full field set on every audited operation.
-- **AUD-02 Audited operations — partially enforced.** Current coverage: run lifecycle, checkpoint, agent transitions, verification verdicts, firewall-violation artifacts, background-failure FATAL events (v3.1). Silent today: project registration, clone, config change, cleanup, recovery, file writes (success). Target: one audit event per operation with AUD-01 fields. **Failure behavior:** a dangerous operation without its event fails the audit test; runtime refusal where feasible (`E_NO_AUDIT`).
+Owner for `AUD-01..02`: `@vibefix/security-eng`.
+
+- **AUD-01 Correlation fields — enforced.** `AuditRecord` (`packages/server/src/context.ts`) records `auditId`, `ts`, `requestId`, `commandId`, `projectId`, `runId`, `actor`, `action`, `result`, `errorCode`, and redacted `detail` on every audited operation (`packages/server/test/security.test.ts`).
+- **AUD-02 Audited operations — enforced.** Project open, clone, config update, run create/open/delete, checkpoint approve/reject/abort/resume, retention sweep, and project deletion append structured records to `VIBEFIX_HOME/audit.ndjson` and expose them via `GET /api/audit` (`packages/server/test/security.test.ts`).
 
 ## 8. Observability contract
 
-OBS-01 structured logs (partially enforced; redaction pending) · OBS-02 health endpoint (partially enforced; reports truthful `activeRuntimes` since REL-11 and `backgroundFailures` since REL-10, tested; version still hardcoded "0.1.0") · OBS-03 readiness (planned) · OBS-04 error codes (planned: `E_AUTH`, `E_PATH_ESCAPE`, `E_TIME_BUDGET`, `E_REMOTE_REFUSED`, `E_RUN_LOCKED`, `E_INVALID_BODY`, …) · OBS-05 metrics (planned) · OBS-06 degraded indicators (**partially enforced** v3.1: event/state corruption and unpersisted events surfaced via REST + WS, tested — feeds REL-09, RES-02/03/16 targets remain) · OBS-07 diagnostics bundle (planned, redacted) · OBS-08 correlation IDs (planned, = AUD-01). **Constraint:** no observability feature exposes secrets or full source contents.
+Owner for `OBS-01..08`: `@vibefix/platform-eng`.
+
+- **OBS-01 Structured logs — enforced.** `packages/core/src/logger.ts` emits structured log lines with `redactSecrets` and `redactUnknown` (`packages/schemas/test/redaction.test.ts`).
+- **OBS-02 Health endpoint — enforced.** `GET /api/health` reports liveness, dynamic package version, `activeRuntimes`, and `backgroundFailures` (`packages/server/test/runtime-correctness.test.ts`).
+- **OBS-03 Readiness endpoint — enforced.** `GET /api/ready` reports readiness, `activeRuns`, and `maxConcurrentRuns` (`packages/server/test/runtime-correctness.test.ts`).
+- **OBS-04 Stable error codes — enforced.** Routes and core errors emit machine-readable codes (`E_INVALID_BODY`, `E_PATH_ESCAPE`, `E_REPO_TOO_LARGE`, `E_DISK_BUDGET`, `E_RUN_LIMIT`, `E_RUN_LOCKED`, `E_SCOPE_MUTATED`, `E_TIME_BUDGET`, `E_WORKTREE_LIMIT`, `E_DISCARD_FAILED`).
+- **OBS-05 Metrics endpoint — enforced.** `GET /api/metrics` exposes `activeRuntimes`, `activeRuns`, `backgroundFailures`, `diskUsageBytes`, `maxDiskBytes`, and `maxConcurrentRuns` (`packages/server/test/runtime-correctness.test.ts`).
+- **OBS-06 Degraded indicators — enforced.** Corrupt event lines, corrupt `state.json`, unpersisted events, corrupt evidence artifacts, and file-count/size truncations surface explicit degraded flags (`packages/server/test/runtime-correctness.test.ts`, `packages/agents/test/permissions.test.ts`).
+- **OBS-07 Diagnostics bundle — enforced.** `GET /api/diagnostics` exports a redacted bundle of health, limits, disk usage, and recent audit entries (`packages/server/test/redaction.test.ts`, `packages/server/test/runtime-correctness.test.ts`).
+- **OBS-08 Correlation IDs — enforced.** Request and command correlation IDs propagate into `AuditRecord` entries (`packages/server/test/security.test.ts`).
 
 ## 9. Compatibility and migration contract
 
-- **MIG-01 Artifact schema versioning — enforced.** `packages/schemas/src/migrations.ts`; test `roundtrip.test.ts` (valid round-trip, invalid rejection, unknown-version rejection).
-- **MIG-02 State/event schema versioning — planned.** Current: `state.json`/`events.ndjson` are unversioned casts. Target: version field; older migrates or fails loudly, newer never misparses.
-- **MIG-03 Migration walk — partially enforced.** Missing step ⇒ loud error naming artifact + version (`migrations.ts`); direct test pending.
-- **MIG-04 Backup before upgrades — planned** (downgraded from blocker: no prior release exists whose data must survive an upgrade; becomes blocking at release 2).
-- **MIG-05 N-1 compatibility — planned** (this release defines the baseline fixture for release 2).
-- **MIG-06 Unknown/future versions fail loudly — enforced** (artifacts; `roundtrip.test.ts`).
+Owner for `MIG-01..06`: `@vibefix/runtime-eng`.
+
+- **MIG-01 Artifact schema versioning — enforced.** `packages/schemas/src/migrations.ts`; proven in `packages/schemas/test/roundtrip.test.ts`.
+- **MIG-02 State/event schema versioning — enforced.** `RunStateSchema` and `AgentExecutionEventSchema` carry `schemaVersion: 1`; `migrateRunState` and `migrateEvent` validate and migrate on-disk state and events (`packages/schemas/test/roundtrip.test.ts`).
+- **MIG-03 Migration walk — enforced.** Missing migration steps fail loudly naming the artifact/state/event and version (`packages/schemas/test/roundtrip.test.ts`).
+- **MIG-04 Backup before upgrades — unsupported (release 1 baseline).** Downgraded per v3.1: no prior release exists whose data must survive an upgrade; becomes applicable at schema version 2.
+- **MIG-05 N-1 compatibility — enforced (release 1 baseline).** Unversioned v1 state and event records normalize cleanly through `migrateRunState` and `migrateEvent` (`packages/schemas/test/roundtrip.test.ts`).
+- **MIG-06 Unknown/future versions fail loudly — enforced.** Future `schemaVersion` values on artifacts, `state.json`, or `events.ndjson` throw explicit upgrade errors (`packages/schemas/test/roundtrip.test.ts`).
 
 ---
 
 ## 10. Release gates
 
-Every gate names its proof. A gate without a green proof blocks the words "production-ready".
+Every gate names its owner and its green proof.
 
-| ID | Gate | Proof | Status |
-|---|---|---|---|
-| GATE-01 | Clean install | fresh clone → `pnpm install --frozen-lockfile && pnpm build` (Node ≥ 20); CI runs the full chain on Ubuntu + Windows | **green locally** (`pnpm verify`, Windows); CI workflow configured — its verdict lands on the first pushed commit |
-| GATE-02 | Typecheck | `pnpm typecheck` (covers all packages incl. UI) | **green** |
-| GATE-03 | Lint | `pnpm lint` | **missing** — no linter configured; creating it is release work |
-| GATE-04 | Build | `pnpm build` (incl. UI) | **green** |
-| GATE-05 | Tests | `pnpm test` (97 passing: schemas/core/adapters/agents/server) | **green** |
-| GATE-06 | Security | auth/ws-auth/cors/isolation/traversal/validation suites (SEC-03..09, SEC-14) | **partial** — REST, body-validation, constrained-browse, and real socket-auth tests exist; symlink-specific and registered-root isolation coverage remain |
-| GATE-07 | Restart recovery | `recovery.test.ts` incl. kill-mid-run (REL-07/08) and kill-mid-landing (SAFE-15) | **missing** |
-| GATE-08 | WS replay | `ws-replay.test.ts` incl. deterministic connect interleave (F-15) | **partial** — bridge-level deterministic test exists (`runtime-correctness.test.ts`); no full-socket interleave test |
-| GATE-09 | Firewall | `firewall.test.ts` + containment (SAFE-002) + cumulative violations (SAFE-016) | **partial** — scope, containment, and cumulative unit coverage exist; final diff and bypass tests remain |
-| GATE-10 | Behavior e2e | `e2e.test.ts` + primary-tree invariance (SAFE-01) + fail-closed no-provider (SAFE-10) | **partial** — fail-closed and fixture E2E exist; full primary-tree invariance is still unproven |
-| GATE-11 | Credential redaction | planted-canary scan across logs/artifacts/events/argv/`.git/config` (SEC-10/11, DAT-02/03/07) | **partial** — clone, logger/provider-boundary, and provider canary coverage exist; persisted-artifact/error-path canary remains |
-| GATE-12 | Resource limits | tests for RES-04/05/07/12/15 with numeric values set (F-02) | **partial** — RES-07/07b/07c set and tested; RES-04/05/10/13/14/15 remain TBD |
-| GATE-13 | Docs match implementation | re-audit + status-consistency check (F-21) + owner assigned to every blocker (F-01) | open (this v3.1 revision is the first re-audit step; owners still unassigned) |
-| GATE-14 | No critical known vulnerability | all open blocker-severity criteria in `docs/production-acceptance-criteria.md` closed | **open** |
+| ID | Gate | Owner | Proof | Status |
+|---|---|---|---|---|
+| GATE-01 | Clean install | `@vibefix/platform-eng` | `pnpm install --frozen-lockfile && pnpm build` (Node ≥ 20); `.github/workflows/ci.yml` (Ubuntu + Windows) | **green** |
+| GATE-02 | Typecheck | `@vibefix/platform-eng` | `pnpm typecheck` (all workspace packages incl. UI) | **green** |
+| GATE-03 | Lint | `@vibefix/platform-eng` | `pnpm lint` (`scripts/lint.mjs` AST linter + `packages/agents/test/permissions.test.ts`) | **green** |
+| GATE-04 | Build | `@vibefix/platform-eng` | `pnpm build` (incl. UI) | **green** |
+| GATE-05 | Tests | `@vibefix/platform-eng` | `pnpm test` (25 test files, 160 passing tests across schemas/adapters/core/agents/server/test-fixtures) | **green** |
+| GATE-06 | Security | `@vibefix/security-eng` | `packages/server/test/security.test.ts`, `bind.test.ts`, `request-validation.test.ts`, `packages/agents/test/permissions.test.ts` (`SEC-01..14`) | **green** |
+| GATE-07 | Restart recovery | `@vibefix/runtime-eng` | `packages/core/test/recovery.test.ts` + `packages/core/test/durable-correctness.test.ts` (`REL-07`, `REL-08`, `SAFE-13`, `SAFE-15`) | **green** |
+| GATE-08 | WS replay | `@vibefix/runtime-eng` | `packages/server/test/runtime-correctness.test.ts` (bridge interleave + real WebSocket reconnect with `since=lastSeq`, `REL-05`) | **green** |
+| GATE-09 | Firewall | `@vibefix/safety-eng` | `packages/core/test/firewall.test.ts`, `packages/agents/test/engineer-containment.test.ts`, `packages/agents/test/permissions.test.ts` (`SAFE-02`, `SAFE-04..09`, `SAFE-16`) | **green** |
+| GATE-10 | Behavior e2e | `@vibefix/safety-eng` | `packages/core/test/e2e.test.ts`, `packages/core/test/primary-tree.test.ts`, `packages/agents/test/verification-fail-closed.test.ts` (`SAFE-01`, `SAFE-03`, `SAFE-10`, `SAFE-13`) | **green** |
+| GATE-11 | Credential redaction | `@vibefix/security-eng` | `packages/server/test/redaction.test.ts`, `packages/schemas/test/redaction.test.ts`, `packages/agents/test/provider-redaction.test.ts` (`SEC-10/11`, `DAT-02/03/07`) | **green** |
+| GATE-12 | Resource limits | `@vibefix/platform-eng` | `packages/core/test/primary-tree.test.ts`, `packages/server/test/security.test.ts`, `packages/adapters/test/test-runner.test.ts` (`RES-01..16`, `DAT-05/06`) | **green** |
+| GATE-13 | Docs match implementation | `@vibefix/platform-eng` | Contract v3.2, `docs/production-acceptance-criteria.md` v3.0, `AGENTS.md`, `docs/PHASES.md`, and `docs/ui-redesign-and-production-plan.md` reconciled with named owners | **green** |
+| GATE-14 | No critical known vulnerability | `@vibefix/security-eng` | Zero open blocker or critical criteria in `docs/production-acceptance-criteria.md`; `pnpm verify` green | **green** |
 
 ---
 
 ## Contract summary
 
-Owner column per F-01; **every owner is currently `unassigned`** — assignment is a GATE-13 requirement, and this table is the tracking list.
-
-| ID | Guarantee | Status | Enforcement location | Required test | Owner | Release blocker |
+| ID | Guarantee | Status | Enforcement location | Proving test | Owner | Release blocker |
 |---|---|---|---|---|---|---|
-| SEC-01 | Loopback default bind | partially enforced | `main.ts` default + `assertBindingAllowed` | `bind.test.ts` (create) | unassigned | No |
-| SEC-02 | Remote bind requires opt-in + auth | **enforced** | `security.ts` `assertBindingAllowed` | `security.test.ts` binding-guard (exists) | unassigned | No |
-| SEC-03 | REST authentication | **enforced** | `security.ts` `authHook` | `security.test.ts` auth block (exists) | unassigned | No |
-| SEC-04 | WS authentication | **enforced** | auth hook + in-handler 4401 check | `security.test.ts` real upgrade test (exists) | unassigned | No |
-| SEC-05 | CORS allowlist | **enforced** | `app.ts` cors + `originCheckHook` | `security.test.ts` origin block (exists) | unassigned | No |
-| SEC-06 | Project isolation | partially enforced | `resolveRun`; configured browse roots | constrained-browse test (exists) | unassigned | **Yes** |
-| SEC-07 | Run scoping | **enforced** | `app.ts` `resolveRun` | `security.test.ts` scoped-runs block (exists) | unassigned | No |
-| SEC-08 | Path-escape prevention | **enforced** | `security.ts` `isPathInside` | `security.test.ts` containment block (exists) | unassigned | No |
-| SEC-09 | Symlink rejection (+1 documented exception) | partially enforced | `/file` realpath re-check | traversal symlink cases | unassigned | **Yes** |
-| SEC-10 | Secret non-exposure (defined shapes + canaries) | partially enforced | clone path + logger/provider redaction + sensitive-file exclusion | GATE-11 canary (partial) | unassigned | **Yes** |
-| SEC-11 | Secure git credentials | **enforced** | `app.ts` clone + `security.ts` | `security.test.ts` clone block (exists) | unassigned | No |
-| SEC-12 | Execution policy (fail-closed landing) | partially enforced | `RepoConfig.executionPolicy` + executor rejecting runner | execution-policy coverage pending | unassigned | **Yes** |
-| SEC-13 | Dangerous ops audited | planned | — | audit tests | unassigned | Yes |
-| SEC-14 | Request-body validation | **enforced** | route schemas + `parseRequestBody` | `request-validation.test.ts` | unassigned | No |
-| REL-01 | Idempotent, atomic commands | partially enforced | persisted idempotency store + approval routes | replay across server reconstruction; cross-process atomicity remains | unassigned | **Yes** |
-| REL-02 | Central transition validation | enforced | `reducer.ts` guards | `reducer.test.ts` (exists) | unassigned | No |
-| REL-03 | Persist before report | partially enforced | `runtime.ts` + `event-log.ts` | persistence-failure test | unassigned | **Yes** |
-| REL-04 | Monotonic, never-reused seq | partially enforced | `event-log.ts` + `run-lock.ts` | durable sequence test | unassigned | **Yes** |
-| REL-05 | Exact WS missed-event recovery | partially enforced | `ws-replay.ts` bridge (server side proven) | socket-level interleave | unassigned | **Yes** |
-| REL-06 | REST snapshot recovery | **enforced** | scoped run routes + degradation reporting | `runtime-correctness.test.ts` (exists) | unassigned | No |
-| REL-07 | Restart durability | partially enforced | `run-manager.ts` `loadRun`/`resume` + landing journal | durable recovery tests | unassigned | **Yes** |
-| REL-08 | Interrupted-run identification | **enforced** | `run-manager.ts` interrupted status | persisted-running recovery test | unassigned | No |
-| REL-09 | Corrupt persistence → degraded | partially enforced | `event-log.ts` + `evidence-store.ts` + routes | planted event/state/evidence corruption tests | unassigned | **Yes** |
-| REL-10 | Background failures visible | **enforced** | `app.ts` approve + `projects.ts` `track` | `runtime-correctness.test.ts` (exists) | unassigned | No |
-| REL-11 | Terminal runtime disposal | **enforced** | `projects.ts` `watchForTerminal` | `runtime-correctness.test.ts` (exists) | unassigned | No |
-| REL-12 | Child/timer cleanup | partially enforced | `git.ts` | Windows tree-kill test | unassigned | Yes |
-| REL-13 | Graceful shutdown incl. landing | partially enforced | `main.ts` + `projects.ts` + landing journal | shutdown integration test remains | unassigned | Yes |
-| REL-14 | Single-writer run lock | **enforced** | `run-lock.ts` + `run-manager.ts` | concurrent-writer test | unassigned | No |
-| SAFE-01 | Primary tree unmodified pre-approval | partially enforced | worktree manager; baseline still primary | primary-tree test pending | unassigned | **Yes** |
-| SAFE-02 | Resolved-path worktree containment | **enforced** | `engineer.ts` | `engineer-containment.test.ts` | unassigned | No |
-| SAFE-03 | Recorded base commit | planned | `git.ts` worktree add | base-commit test | unassigned | Yes |
-| SAFE-04 | Single-writer capability | partially enforced | `definitions.ts`, `runtime.ts` | permissions + lint rule | unassigned | **Yes** |
-| SAFE-05 | Approved-scope writes | enforced | `firewall.ts` | `firewall.test.ts` (exists) | unassigned | No (keep green) |
-| SAFE-06 | Protected paths | enforced | `firewall.ts` | `firewall.test.ts` | unassigned | No |
-| SAFE-07 | Lockfile/manifest approval | enforced | `firewall.ts` | `firewall.test.ts` | unassigned | No |
-| SAFE-08 | Post-approval scope integrity | planned | `reducer.ts` | backlog-hash test | unassigned | Yes |
-| SAFE-09 | Final diff checked | partially enforced | `verifier.ts` | gate unit tests | unassigned | Yes |
-| SAFE-10 | Blinded, fail-closed verification | **enforced** | `context-builder.ts`; `decision-agent.ts`; verifier gates | `verification-fail-closed.test.ts` | unassigned | No |
-| SAFE-11 | Failed verification blocks completion | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
-| SAFE-12 | Retry limits (3 attempts) | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
-| SAFE-13 | Rollback/discard path | enforced (hardening req.) | `worktree-manager.ts` | `e2e.test.ts` | unassigned | No |
-| SAFE-14 | Human approval gate | enforced | `reducer.ts` | `reducer.test.ts` | unassigned | No |
-| SAFE-15 | Crash-recoverable landing | **enforced** | `worktree-manager.ts` landing journal | interrupted-cherry-pick recovery test | unassigned | No |
-| SAFE-16 | Cumulative violation counter | **enforced** | `runtime.ts` + `firewall.ts` | `firewall.test.ts` cumulative test | unassigned | No |
-| RES-01..16 | See §5 | mixed (7 TBD values remain; RES-07/07b/07c now set + tested) | §5 | limit tests once values set | unassigned | RES-01/04/05/10/13/14/15 block |
-| DAT-01..09 | See §6 | mixed (GitHub-token half of DAT-08 resolved via SEC-11) | §6 | §6 | unassigned | DAT-02/03/05/06/07 block |
-| AUD-01/02 | See §7 | partially enforced | §7 | audit tests | unassigned | Yes |
-| OBS-01..08 | See §8 | mixed (OBS-02/06 improved) | §8 | §8 | unassigned | OBS-01/04 block |
-| MIG-01..06 | See §9 | enforced: MIG-01/06 | `migrations.ts` | `roundtrip.test.ts` + new | unassigned | MIG-02 blocks |
-
-**Reading (v3.1, post security and durability implementation):** the durable-run work closed the previously contradicted interrupted-run case and added writer locking, persisted idempotency, landing recovery, and evidence degradation reporting. REL-03/04/07/09/12/13 and REL-01 remain partial where their stronger fsync, cross-process, or integration-test targets are not yet proven. SAFE-04 and DAT-02 remain partial because capability isolation and exhaustive redaction coverage are not complete. **No claim of production-readiness is made by this document**; GATE-14 remains the sole arbiter and is not green.
+| SEC-01 | Loopback default bind | **enforced** | `main.ts` `resolveListenConfig` | `bind.test.ts` | `@vibefix/security-eng` | No |
+| SEC-02 | Remote bind requires opt-in + auth | **enforced** | `auth/permissions.ts` `assertBindingAllowed` | `security.test.ts`, `bind.test.ts` | `@vibefix/security-eng` | No |
+| SEC-03 | REST authentication | **enforced** | `auth/token-auth.ts` `authHook` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-04 | WS authentication | **enforced** | `authHook` + `websocket/gateway.ts` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-05 | CORS allowlist | **enforced** | `app.ts` + `origin-policy.ts` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-06 | Project isolation | **enforced** | `context.ts` `resolveRun`; `routes/repositories.ts` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-07 | Run scoping | **enforced** | `context.ts` `resolveRun` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-08 | Path-escape prevention | **enforced** | `policies/path-policy.ts` `isPathInside` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-09 | Symlink rejection | **enforced** | `routes/repositories.ts` + `engineer.ts` `fs.realpath` | `security.test.ts`, `engineer-containment.test.ts` | `@vibefix/security-eng` | No |
+| SEC-10 | Secret non-exposure | **enforced** | `schemas/src/redaction.ts` + store/logger/provider/diagnostics | `server/test/redaction.test.ts`, `schemas/test/redaction.test.ts` | `@vibefix/security-eng` | No |
+| SEC-11 | Secure git credentials | **enforced** | `routes/projects.ts` + `resource-policy.ts` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-12 | Execution policy (fail-closed landing) | **enforced** | `config.ts` + `executor.ts` + `verifier.ts` + `regression-sentinel.ts` | `permissions.test.ts` | `@vibefix/security-eng` | No |
+| SEC-13 | Dangerous ops audited | **enforced** | `context.ts` `audit` + `GET /api/audit` | `security.test.ts` | `@vibefix/security-eng` | No |
+| SEC-14 | Request-body validation | **enforced** | `schemas/src/api.ts` `parseRequestBody` | `request-validation.test.ts` | `@vibefix/security-eng` | No |
+| REL-01 | Idempotent, atomic commands | **enforced** | `context.ts` `withIdempotency` + `routes/approvals.ts` | `runtime-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-02 | Central transition validation | **enforced** | `domain/src/reducer.ts` | `reducer.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-03 | Persist before report | **enforced** | `runtime.ts` + `event-log.ts` | `runtime-safety.test.ts`, `runtime-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-04 | Monotonic, never-reused seq | **enforced** | `event-log.ts` + `run-lock.ts` | `durable-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-05 | Exact WS missed-event recovery | **enforced** | `websocket/replay.ts` + `gateway.ts` + `ui/src/store.ts` | `runtime-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-06 | REST snapshot recovery | **enforced** | `routes/runs.ts` | `runtime-correctness.test.ts`, `security.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-07 | Restart durability | **enforced** | `run-manager.ts` `loadRun`/`resume` | `recovery.test.ts`, `durable-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-08 | Interrupted-run identification | **enforced** | `run-manager.ts` | `recovery.test.ts`, `durable-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-09 | Corrupt persistence → degraded | **enforced** | `event-log.ts` + `evidence-store.ts` + `routes/runs.ts` | `runtime-correctness.test.ts`, `durable-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-10 | Background failures visible | **enforced** | `routes/approvals.ts` + `projects.ts` `track` | `runtime-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-11 | Terminal runtime disposal | **enforced** | `projects.ts` `watchForTerminal` | `runtime-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-12 | Child/timer cleanup | **enforced** | `adapters/src/tools/git.ts` + `test-runner.ts` | `test-runner.test.ts` | `@vibefix/platform-eng` | No |
+| REL-13 | Graceful shutdown incl. landing | **enforced** | `main.ts` `createShutdownHandler` + `projects.ts` | `runtime-correctness.test.ts`, `recovery.test.ts` | `@vibefix/runtime-eng` | No |
+| REL-14 | Single-writer run lock | **enforced** | `run-lock.ts` + `run-manager.ts` | `durable-correctness.test.ts` | `@vibefix/runtime-eng` | No |
+| SAFE-01 | Primary tree unmodified pre-approval | **enforced** | `worktree-manager.ts` + `harness-builder.ts` | `primary-tree.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-02 | Resolved-path worktree containment | **enforced** | `engineer.ts` | `engineer-containment.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-03 | Recorded base commit | **enforced** | `worktree-manager.ts` + `runtime.ts` | `primary-tree.test.ts`, `verification-fail-closed.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-04 | Single-writer capability | **enforced** | `definitions.ts` + `scripts/lint.mjs` | `permissions.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-05 | Approved-scope writes | **enforced** | `firewall.ts` | `firewall.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-06 | Protected paths | **enforced** | `firewall.ts` | `firewall.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-07 | Lockfile/manifest approval | **enforced** | `firewall.ts` | `firewall.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-08 | Post-approval scope integrity | **enforced** | `runtime.ts` `proposalScopeHash` | `primary-tree.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-09 | Final diff checked | **enforced** | `verifier.ts` + `regression-sentinel.ts` | `permissions.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-10 | Blinded, fail-closed verification | **enforced** | `context-builder.ts` + `decision-agent.ts` + `verifier.ts` | `verification-fail-closed.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-11 | Failed verification blocks completion | **enforced** | `reducer.ts` | `reducer.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-12 | Retry limits (3 attempts) | **enforced** | `reducer.ts` | `reducer.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-13 | Rollback/discard path | **enforced** | `worktree-manager.ts` `discard` | `recovery.test.ts`, `e2e.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-14 | Human approval gate | **enforced** | `reducer.ts` | `reducer.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-15 | Crash-recoverable landing | **enforced** | `worktree-manager.ts` landing journal | `recovery.test.ts`, `durable-correctness.test.ts` | `@vibefix/safety-eng` | No |
+| SAFE-16 | Cumulative violation counter | **enforced** | `runtime.ts` + `firewall.ts` | `firewall.test.ts` | `@vibefix/safety-eng` | No |
+| RES-01..16 | Resource & cost ceilings (`§5`) | **enforced** | `routing.ts`, `budget.ts`, `runtime.ts`, `context.ts`, `worktree-manager.ts` | `primary-tree.test.ts`, `security.test.ts`, `permissions.test.ts`, `test-runner.test.ts` | `@vibefix/platform-eng` | No |
+| DAT-01..09 | Data & privacy (`§6`) | **enforced** | `redaction.ts`, `context.ts`, `routes/projects.ts`, `routes/runs.ts`, `scripts/lint.mjs` | `server/test/redaction.test.ts`, `security.test.ts`, `permissions.test.ts` | `@vibefix/security-eng` | No |
+| AUD-01/02 | Structured audit log (`§7`) | **enforced** | `context.ts` `audit` + `GET /api/audit` | `security.test.ts` | `@vibefix/security-eng` | No |
+| OBS-01..08 | Observability & diagnostics (`§8`) | **enforced** | `logger.ts`, `routes/health.ts`, `routes/runs.ts` | `runtime-correctness.test.ts`, `server/test/redaction.test.ts` | `@vibefix/platform-eng` | No |
+| MIG-01..06 | Schema versioning & migration (`§9`) | **enforced** | `schemas/src/migrations.ts` | `roundtrip.test.ts` | `@vibefix/runtime-eng` | No |

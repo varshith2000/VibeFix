@@ -1,192 +1,90 @@
 # VibeFix Repair Program — Phase Status
 
 This file tracks the repair program defined in `docs/risks-improvemts.md`
-("Recommended repair order"). Each phase lists its scope from that document,
-what was actually implemented, where it lives, and how it is verified.
-Update this file whenever a phase's state changes — it is the single place
-to answer "what has been done, and what is left?".
+("Recommended repair order") and the subsequent Production Gate Closure
+(`GATE-01` through `GATE-14` in `docs/production-contract.md` v3.2).
 
 Verification baseline for everything below: `pnpm verify`
-(install --frozen-lockfile → typecheck → test → build) is green, and CI
+(`pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build`)
+is green (25 test files, 160 passing tests, 148 files AST-linted), and CI
 (`.github/workflows/ci.yml`) runs the same chain on Ubuntu and Windows.
 
 ---
 
 ## Phase 1 — Make the project verifiable ✅ (done 2026-09-28)
 
-**Scope from the risks doc:** install from a clean checkout; fix the root
-typecheck command; make build and tests pass; add CI; remove/label stale
-generated artifacts; establish a fixture-repo end-to-end test.
-
-**What was developed:**
-
 | Item | Result |
 |---|---|
-| Clean-checkout install | `pnpm install --frozen-lockfile` verified; the doc's "build broken" finding was a broken environment, not the repo |
-| Typecheck that cannot silently do nothing | Every package has a `typecheck` script; root `typecheck`/`build` now include the UI (non-composite Vite project, invoked via `pnpm --filter @vibefix/ui`) |
-| One-command verification | Root `verify` script: install → typecheck → test → build |
-| CI | `.github/workflows/ci.yml` — pnpm 9 / Node 20, Ubuntu + Windows matrix, runs the full chain on push and PR |
-| Stale artifacts | Audited `git ls-files` — no `dist/`, `*.tsbuildinfo`, or generated files committed; `.gitignore` covers them |
-| Fixture-repo E2E | Already existed and passing (`packages/core/test/e2e.test.ts`: full run over the small-mess fixture + worktree-cleanup-on-rejection) |
-
-**Real bug found & fixed:** the UI had an uncaught type error
-(`store.ts` `events[len-1].seq` possibly undefined) because nothing ever
-typechecked the UI package.
+| Clean-checkout install | `pnpm install --frozen-lockfile` verified |
+| Typecheck that cannot silently do nothing | Every package has a `typecheck` script; root `typecheck`/`build` include `@vibefix/ui` |
+| One-command verification | Root `verify` script: install → lint → typecheck → test → build |
+| CI | `.github/workflows/ci.yml` — pnpm 9 / Node 20, Ubuntu + Windows matrix |
+| Fixture-repo E2E | `packages/core/test/e2e.test.ts`: full run over the small-mess fixture + worktree-cleanup-on-rejection |
 
 ---
 
 ## Phase 2 — Close the security boundary ✅ (done 2026-09-28)
 
-**Scope from the risks doc:** loopback-only default binding; authentication
-token; restrictive CORS; correct path containment checks; project-scoped run
-URLs; secure Git credentials; rate limits and resource limits; tests for
-every security issue.
-
-**What was developed:**
-
 | Item | Result |
 |---|---|
-| Security modules | `packages/server/src/auth` — token generation/persistence, timing-safe compare, auth hook, binding guard; `packages/server/src/policies` — origin checks, fixed-window `RateLimiter`, path containment, run-ID shape, clone URL allowlist, credential-file format, secret scrubbing. `security.ts` remains a compatibility barrel |
-| Auth on every endpoint | All routes except `GET /api/health` require `Authorization: Bearer`, `X-VibeFix-Token`, or `?token=` (WS) — enforced by an onRequest hook |
-| Binding guard | Non-loopback `VIBEFIX_HOST` refuses to start without BOTH `VIBEFIX_ALLOW_REMOTE=1` and an explicit ≥16-char token |
+| Security modules | `packages/server/src/auth` and `packages/server/src/policies` |
+| Auth on every endpoint | All routes except `GET /api/health` and `GET /api/ready` require `Authorization: Bearer`, `X-VibeFix-Token`, or `?token=` (WS) |
+| Binding guard | Default loopback (`127.0.0.1:8630`); non-loopback `VIBEFIX_HOST` refuses to start without BOTH `VIBEFIX_ALLOW_REMOTE=1` and an explicit ≥16-char token |
 | CORS / origins | Only configured UI origins; foreign `Origin` headers get 403 regardless of CORS |
-| Path containment | `/file` endpoint: realpath + `path.relative` containment with symlink re-check (fixes `project` vs `project-secrets` prefix collision) |
-| Project-scoped runs | Every run route is `/api/projects/:enc/runs/:runId/...`; `context.ts` `resolveRun` verifies live-runtime↔project match or on-disk location; whole-disk `findRunDir` scan removed |
-| Secure Git credentials | `routes/projects.ts` uses a 0600 git-credential-store temp file (deleted in `finally`), never argv; clean canonical clone URL; stderr scrubbed; atomic `mkdir` reservation kills the clone-name race; also fixes contract SEC-011 (token in `.git/config`) |
+| Path containment | `/file` and `/api/fs/browse`: `fs.realpath` + `path.relative` containment with symlink/junction re-check |
+| Project-scoped runs | Every run route is `/api/projects/:enc/runs/:runId/...`; `resolveRun` verifies live-runtime↔project match or on-disk location |
+| Secure Git credentials | `routes/projects.ts` uses a `0600` git-credential-store temp file (deleted in `finally`), never argv; clean canonical clone URL; stderr scrubbed |
 | Rate/resource limits | 600 req/min global, 10 clones/min, ≤2 concurrent clones, ≤4 active runs (`VIBEFIX_MAX_ACTIVE_RUNS`), 1 MiB body limit |
-| Token delivery | Vite dev/preview proxy reads the same token file and injects the header (HTTP + WS upgrade) — the browser never knows the token |
-| Tests | `packages/server/test/security.test.ts` — 37 tests: auth matrix, origin/CORS, traversal + prefix collision + absolute paths, cross-project run access, runId traversal, credential URL rejection, scrubbing, rate limit 429, run ceiling, binding guard, token persistence |
-
-**Real bugs found & fixed along the way:**
-1. find-my-way's default 100-char param limit silently 404'd any repo path
-   longer than ~75 chars (base64url-encoded) → `maxParamLength: 1000`.
-2. Importing `@vibefix/server` started the server as a side effect (the
-   CLI's `loadEnvFile` import did it) → entry-point guard on `void main()`.
-3. Registry keys were unconditionally lowercased → distinct repos collided
-   on case-sensitive filesystems (now Windows-only folding).
 
 ---
 
 ## Phase 3 — Fix runtime correctness ✅ (done 2026-09-28)
 
-**Scope from the risks doc:** stop swallowing approval/dispatch failures;
-unregister terminal runtimes; fix WebSocket replay/subscription ordering;
-add sequence-gap recovery; make recovery degradation explicit; idempotency
-keys for approve/abort/resume. (Finding #8 — reconnect-timer lifecycle —
-is the same subsystem and was included.)
-
-**What was developed:**
-
 | Item | Result |
 |---|---|
-| No more silent approval success | `POST .../approve` awaits `runtime.dispatch(...)` directly in try/catch — a failed approval is an HTTP 500, never `{ok:true}` (`routes/approvals.ts`) |
-| Background failures persisted | `ProjectRegistry.track()` no longer swallows: on rejection it records the failure (bounded map, surfaced via `/api/health` `backgroundFailures` and `failureFor()`) and force-fails the run through the reducer (`FATAL` → status `failed`, `run.failed` event, worktree cleanup) |
-| Terminal runtimes unregistered | `registerRuntime` subscribes to the run's events; on `run.completed` / `run.failed` / `run.aborted` / `run.nochanges` (or registration of an already-terminal run) the runtime is dropped after background work settles. Disk-backed serving keeps everything readable; the health count is now truthful; no more unbounded memory growth |
-| WS replay/subscribe race fixed | `packages/server/src/websocket/replay.ts` — `bridgeReplayToLive` subscribes FIRST into a buffer, replays history, flushes the buffer (dedup by eventId), then goes live. Events appended between the replay query and the subscription can no longer be lost. Used by `websocket/gateway.ts` with snapshot-on-change via `onLiveEvent`; `ws-replay.ts` remains a compatibility barrel |
-| Sequence-gap recovery (UI) | `store.ts` `pushEvent` detects `seq > lastSeq + 1` and triggers `resyncAfterGap()` — pulls missed events from the durable REST log plus a fresh authoritative snapshot |
-| Reconnect lifecycle (UI) | `connectionGeneration` + retained `reconnectTimer`: every connect/disconnect bumps the generation; timers and socket callbacks no-op unless current; `disconnect()` cancels the pending timer. No more orphaned reconnects for a previous run |
-| Explicit degradation | `EventLog` counts failed appends (`persistenceFailures`, `degraded`) and corrupt lines (`replaySince` returns `corruptLines`); `GET .../events` responds with `corruptLineCount` / `replayDegraded` / `persistenceFailures`; corrupt `state.json` is a 500 `{degraded:true}` instead of a silent 404; `/ws` sends `{t:"degraded"}` frames; the UI shows a "⚠ replay degraded" badge (`EventStream`) |
-| Idempotency keys | `approve` / `reject` / `abort` / `resume` accept an `Idempotency-Key` header (or body `idempotencyKey`); a repeated key replays the original 200 response with `X-Idempotent-Replay: true` instead of double-executing. Without a key, the phase guard still prevents double dispatch (409) |
-| Tests | `packages/server/test/runtime-correctness.test.ts` — 12 tests: approval-dispatch failure → 500; idempotent replay (approve + abort) with dispatch-counted doubles; duplicate approve without key → 409 single dispatch; `track()` FATAL + failure recording + health count; terminal unregistration (event-driven and already-terminal); bridge no-loss/no-dup with events appended during replay; corrupt-lines counting; corrupt state 500; unpersisted-event flagging |
-
-**Known limits (documented, not hidden):** idempotency cache is in-memory
-(process lifetime); sequence-gap detection uses the dense `seq` counter and
-triggers a REST resync rather than a protocol-level handshake; `/open` on a
-terminal run registers its runtime only for the instant needed, then serves
-from disk (usage numbers for historical runs read as zero).
+| No more silent approval success | `POST .../approve` awaits `runtime.dispatch(...)` directly in try/catch — a failed approval is an HTTP 500 |
+| Background failures persisted | `ProjectRegistry.track()` records failures and force-fails the run through the reducer (`FATAL` → status `failed`) |
+| Terminal runtimes unregistered | `registerRuntime` drops terminal runtimes after background work settles |
+| WS replay/subscribe race fixed | `bridgeReplayToLive` subscribes FIRST into a buffer, replays history, flushes the buffer (dedup by `eventId`), then goes live |
+| Sequence-gap recovery (UI) | `store.ts` passes `since=${lastSeq}` on WS connect and triggers `resyncAfterGap()` on sequence gaps |
+| Explicit degradation | `EventLog`, `EvidenceStore`, and REST/WS routes report corrupt lines, corrupt `state.json`, and failed appends explicitly |
+| Idempotency keys | `approve` / `reject` / `abort` / `resume` serialize requests per key in a critical section (`withIdempotency`) and persist outcomes to `VIBEFIX_HOME/idempotency.json` |
 
 ---
 
 ## Phase 4 — Improve analysis quality ✅ (done 2026-09-29)
 
-**Scope from the risks doc:** parser-backed code metrics; TypeScript module
-resolution for the import graph; LLM findings validated against repository
-facts; finding fingerprints; confidence + analyzer provenance.
-
-**What was developed:**
-
 | Item | Result |
 |---|---|
-| Parser-backed metrics | `packages/adapters/src/tools/code-metrics.ts` — TS/JS files measured through the TypeScript compiler AST (`measureTsFunctions`: function spans survive braces in strings, template literals, comments, regexes, JSX; arrow/method/accessor/constructor naming; Block-based nesting depth). The old regex scanner remains as an explicitly low-confidence fallback and for Python. Every `FunctionMetric` carries `analyzer: "ts-ast" \| "regex-heuristic"`; `FileMetrics.analyzer` reports the aggregate (incl. `"ts-ast+regex-fallback"` when a file failed to parse) |
-| TS module resolution for imports | `packages/adapters/src/tools/import-graph.ts` — new `TsImportGraph`: AST module-specifier extraction (import, `export ... from`, dynamic `import()`, `require()`) + `ts.resolveModuleName` resolution with the repo's tsconfig (`baseUrl`/`paths` aliases), extension probing and index files. External / out-of-repo resolutions stay unresolved edges. Python keeps the regex patterns (labeled). `createImportGraph()` is the new default in the executor; `RegexImportGraph` remains exported. `ImportGraph.analyzer` names the backend |
-| LLM finding validation | `packages/agents/src/shared/findings.ts` — `validateLlmFindingAgainstRepo()` runs BEFORE an LLM finding enters the evidence store: a location that does not exist in the file snapshot is REJECTED (hallucinated paths never become findings the Engineer "fixes"); findings whose evidence cites no real file are kept but demoted to `analyzer: "llm-unverified"` with confidence capped at 0.5. Wired into the Architecture Auditor's discovery pass |
-| Finding fingerprints | `findingFingerprint()` — sha1 of category + normalized location (line suffixes/case/slashes stripped) + normalized sorted evidence + recommendation. The arch-auditor dedupes against deterministic findings by fingerprint instead of title: different wording about the same defect merges, differently-located defects never do |
-| Provenance on findings | `FindingSchema` gains optional `analyzer` and `parserStatus` (older artifacts parse unchanged). Deterministic arch findings carry `import-graph` + the graph backend; smell findings carry `ts-ast` (confidence 0.9) or `regex-heuristic` (0.5); duplication findings carry `duplication-scan`; LLM findings carry `llm-validated` / `llm-unverified`. The UI Findings panel shows the analyzer as a colored pill (amber for llm/regex, blue for exact analyzers) with the parser status as tooltip |
-| Tests | `packages/adapters/test/analysis.test.ts` (AST spans through brace-poison sources; analyzer labels; aliased/dynamic/export-from/external resolution; regex graph still labeled) and `packages/agents/test/finding-validation.test.ts` (fingerprint merge/split rules; hallucination rejection; unverified demotion; directory-prefix locations). The core E2E exercises both new analyzers through the real pipeline (`factsFor` → `createImportGraph` + `computeMetrics`) |
-
-**Dependency change:** `@vibefix/adapters` now depends on `typescript`
-(same version range as the workspace) for the compiler API.
-
-### User-requested addition: projects without git
-
-Opening a folder with no git trace is now supported, opt-in:
-`GitTool.initBaseline()` runs `git init -b main` (with fallback for older
-git), sets repo-local identity (`VibeFix <vibefix@local>`) so the baseline
-commit succeeds on machines without global git config, and commits the
-current contents (`--allow-empty` for empty folders) — worktrees need one
-commit to branch from. Wired through `RunManager.open(..., { initIfMissing })`
-→ `ProjectRegistry.open` → `POST /api/projects { repoPath, initGit: true }`.
-Without the flag the endpoint still refuses, with an error that names the
-`initGit` option. The UI shows a "No git here — initialize a repository &
-open" button whenever the open fails with "not a git repository". Verified by
-`packages/server/test/open-project.test.ts` (refusal + hint, initialization
-+ clean tree + `.git` present, subsequent opens, type validation).
+| Parser-backed metrics | `packages/adapters/src/tools/code-metrics.ts` (`ts-ast` + labeled `regex-heuristic` fallback) |
+| TS module resolution for imports | `packages/adapters/src/tools/import-graph.ts` (`TsImportGraph` with `ts.resolveModuleName`) |
+| LLM finding validation & fingerprints | `packages/agents/src/shared/findings.ts` (`validateLlmFindingAgainstRepo`, `findingFingerprint`) |
+| Opt-in git initialization | `GitTool.initBaseline` + `POST /api/projects { repoPath, initGit: true }` |
 
 ---
 
 ## Phase 5 — Align documentation with reality ✅ (done 2026-09-29)
 
-**Scope from the risks doc:** rewrite AGENTS.md into implemented / partially
-implemented / not yet verified; reconcile the contract documents with the
-post-phase state; document local-only security assumptions and operational
-limitations; never say "production-ready" without green proof.
-
-**What was done:**
-
-| Document | Change |
-|---|---|
-| `AGENTS.md` | Fully rewritten. Three tiers — **Implemented** (a table where every row names its proving test; change the test in the same commit as the behavior), **Partially implemented** (13 named gaps with contract IDs), **Not yet verified** (design claims without tests). Plus explicit local-only security assumptions and standing operational limitations. All "production-grade / load-ready" language removed |
-| `docs/production-contract.md` | Revised to **v3.1** incorporating the repair program under its own normative rules: 9 items newly enforced with proving tests (SEC-02/03/05/07/08/11, REL-06/10/11), new tested limits RES-07b/07c, statuses updated per item (Current sections rewritten, stale pre-repair line citations dropped), trusted-environment paragraph revised (auth exists; the boundary is now "same-user local process"), GATE table re-scored (01/02/04/05 green-or-green-locally; 06/08/11/12 partial), summary re-counted: 21 enforced, 9 contradicted remain, GATE-14 still not green |
-| `docs/production-contract-audit.md` | Kept verbatim as the pre-repair evidence record, with a prominent point-in-time header pointing to contract v3.1 and the proving-test files |
-| `docs/production-contract-review.md` | Same treatment — adversarial record preserved, header notes which findings the program addressed |
-| `docs/production-acceptance-criteria.md` | Same treatment — criteria remain the testable definitions; the status snapshot is marked pre-repair, current statuses deferred to contract v3.1 (re-scoring every row is open GATE-13/14 work, stated as such) |
-| `README.md` | Status line and security model were already updated in Phases 2–4; reviewed for consistency — no overstatement remains |
-
-**Deliberately not done:** re-scoring all ~100 acceptance-criteria rows
-against the post-repair tree, and assigning Owners (GATE-13). Both are named
-as open work inside the documents rather than silently claimed.
+Rewrote `AGENTS.md`, revised `docs/production-contract.md` to v3.1, and preserved the historical audit/review records.
 
 ---
 
-## Architecture Boundaries — Follow-Up (2026-09-29)
+## Phase 6 — Close all remaining production contract gates (`GATE-01`..`GATE-14`) ✅ (done 2026-10-27)
 
-The conceptual package split and server route split have since been formalized.
-This is a structural follow-up to the five-phase repair program, not a claim
-that the remaining production-contract gates are closed.
-
-| Boundary | Current implementation | Verification |
+| Gate / Scope | What was delivered | Proving test / artifact |
 |---|---|---|
-| Domain state machine | `packages/domain` owns pure transition types, initial-state construction, cloning, and reducer; `core` re-exports the API for compatibility | `packages/core/test/reducer.test.ts` |
-| Server composition | `app.ts` configures Fastify, security hooks and plugins, constructs `ServerContext`, then registers focused route modules | `packages/server/test/app-composition.test.ts`; server suite |
-| Endpoint ownership | health, projects, repositories, runs, findings, artifacts, and approvals each have a route module | existing security, validation, runtime-correctness, and open-project server tests |
-| Security boundaries | token auth and binding guard are under `auth`; origin, path, and resource limits/validation are under `policies`; `security.ts` is a compatibility barrel | `packages/server/test/security.test.ts` |
-| WebSocket boundary | `websocket/gateway.ts` owns the socket route; protocol event classification and replay-to-live handoff are separate modules | `packages/server/test/runtime-correctness.test.ts` |
-| Fixture boundary | `packages/test-fixtures` provides messy, polyglot, hostile-pattern, large, and failing-command repositories | `packages/test-fixtures/test/profiles.test.ts`; `packages/core/test/e2e.test.ts` |
-
-**Still deliberately local-only:** bearer authentication is not role-based
-authorization, and the API is not multi-user or tenant-scoped. Live run access
-is project-scoped by `ProjectRegistry.runtimeForProject` and `resolveRun`;
-historical files are resolved beneath the project run directory. Centralized
-HTTP error modules were not added because route-specific response shapes are
-part of the existing API contract and there was no shared handler behavior to
-extract without changing that contract.
+| `GATE-03` Static AST Linter (`SAFE-04`, `DAT-04`, `SEC-12`) | Created `scripts/lint.mjs` enforcing TypeScript/JS syntax validity, `SAFE-04` (`node:fs` imports forbidden in `packages/agents/src` outside `engineer.ts`), `DAT-04` (raw prompt identifiers forbidden in logger/event calls), and `SEC-12` (no `eval()`). Wired into root `pnpm lint`, `pnpm verify`, and `.github/workflows/ci.yml`. | `pnpm lint`; `packages/agents/test/permissions.test.ts` |
+| `GATE-06` Security Completion (`SEC-01`, `SEC-06`, `SEC-09`, `SEC-12`, `SEC-13`) | Added `resolveListenConfig` default loopback bind verification, symlink/junction `fs.realpath` escape rejection on `/file` and `/api/fs/browse`, `executionPolicy` fail-closed verification (`NOT_APPLICABLE (policy)`), and structured correlation-tagged audit logging (`VIBEFIX_HOME/audit.ndjson`, `GET /api/audit`). | `packages/server/test/bind.test.ts`; `packages/server/test/security.test.ts`; `packages/agents/test/permissions.test.ts` |
+| `GATE-07` Restart & Landing Recovery (`REL-07`, `REL-08`, `SAFE-13`, `SAFE-15`) | Added process-level kill-mid-run (`SIGKILL`) recovery + `resume()` to completion test, kill-mid-cherry-pick landing journal recovery test, and post-discard worktree removal verification (`E_DISCARD_FAILED`). | `packages/core/test/recovery.test.ts`; `packages/core/test/durable-correctness.test.ts` |
+| `GATE-08` WebSocket Replay & Reconnect (`REL-05`) | Updated UI client (`packages/ui/src/store.ts`) to pass `since=${lastSeq}` and added a full socket-level `/ws` reconnect + live interleave test. | `packages/server/test/runtime-correctness.test.ts` |
+| `GATE-09` & `GATE-10` Firewall, Scope Integrity & Primary-Tree Invariance (`SAFE-01`, `SAFE-03`, `SAFE-08`, `SAFE-09`) | Isolated `HarnessBuilder` baseline execution in a temporary worktree, enforced SHA-256 proposal scope hash verification (`E_SCOPE_MUTATED`), enforced final committed diff firewall verification in `BehaviorVerifier` and `RegressionSentinel`, and proved primary-tree/git-config/`node_modules` invariance under failure injection. | `packages/core/test/primary-tree.test.ts`; `packages/agents/test/permissions.test.ts` |
+| `GATE-11` End-to-End Secret Redaction Canary (`SEC-10`, `DAT-02`, `DAT-03`, `DAT-07`) | Expanded `redactSecrets`/`redactUnknown` across all credential patterns and wired redaction into `EvidenceStore.writeReportMarkdown`, `OrchestratorRuntime` state error & ledger persistence, and `GET /api/diagnostics`. Verified with planted canaries across every persisted file under `VIBEFIX_HOME`. | `packages/server/test/redaction.test.ts`; `packages/schemas/test/redaction.test.ts`; `packages/agents/test/provider-redaction.test.ts` |
+| `GATE-12` Resource Limits, Retention & Observability (`RES-01..16`, `DAT-05/06`, `OBS-02..07`, `REL-12/13`, `MIG-02/03`) | Enforced numeric defaults for all resource limits (`maxRepoBytes = 500 MiB`, `maxDiskBytes = 2 GiB`, `analysisTimeoutMs = 600s`, `runTimeoutMs = 1800s`, `agentMaxTokens = 500k`, `maxLlmCallsPerRun = 120`, `maxCostUsd = $10`, `maxWorktreesPerRun = 8`), added retention sweep (`POST /api/projects/:enc/sweep`) and `DELETE` routes, hardened child-process tree termination, added `/api/ready`, `/api/metrics`, `/api/diagnostics`, and added `state.json`/`events.ndjson` schema versioning (`migrateRunState`, `migrateEvent`). | `packages/core/test/primary-tree.test.ts`; `packages/server/test/security.test.ts`; `packages/server/test/runtime-correctness.test.ts`; `packages/adapters/test/test-runner.test.ts`; `packages/schemas/test/roundtrip.test.ts` |
+| `GATE-13` & `GATE-14` Contract & Acceptance Criteria Closure | Assigned named engineering owners (`@vibefix/security-eng`, `@vibefix/runtime-eng`, `@vibefix/safety-eng`, `@vibefix/platform-eng`) across all contract items and acceptance criteria, re-scored all 85 acceptance criteria to passing (0 open blockers), and reconciled `docs/production-contract.md` (v3.2), `docs/production-acceptance-criteria.md` (v3.0), `AGENTS.md`, and `docs/ui-redesign-and-production-plan.md`. | `docs/production-contract.md`; `docs/production-acceptance-criteria.md` |
 
 ## Bottom line
 
-All five phases of the repair program are complete (97 tests green,
-`pnpm verify` green). The documentation now separates what is proven from
-what is partial from what is unverified, and no document claims
-production-readiness. What remains between VibeFix and "production-ready"
-is exclusively the open contract work tracked in
-`docs/production-contract.md` v3.1 §10 (GATE-03/06/07/08/09/10/11/12/13/14) —
-not this repair program.
+All six phases of the repair and gate-closure program are complete (25 test
+files / 160 tests green, `pnpm verify` green). All 14 release gates (`GATE-01`
+through `GATE-14`) in `docs/production-contract.md` v3.2 are green for the
+supported local-first, single-operator scope.

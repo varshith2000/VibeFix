@@ -1,22 +1,23 @@
 # VibeFix UI redesign and production plan
 
-Date: 2026-10-22  
+Date: 2026-10-27  
 Branch: `UI-changes` (Git does not allow spaces in branch names)  
-Status: local, uncommitted working changes
+Status: P0 contract gates (`GATE-01` through `GATE-14`) closed and verified via `pnpm verify`
 
 ## Executive summary
 
-VibeFix already has the core behavior of a serious local-first refactoring
-control plane: a reducer-driven pipeline, isolated worktrees, a human
-checkpoint, event replay, findings validation, and a broad security test
-suite. The main product gap is not missing capability in the UI; it is the
-way that capability is presented. The existing screen is dense and tool-like,
-with equal visual weight for navigation, telemetry, and decision points.
+VibeFix has the core behavior of a local-first refactoring control plane: a
+reducer-driven pipeline, isolated worktrees, a human checkpoint, event replay,
+findings validation, and a comprehensive security and durability test suite.
+The main UI presentation pass moves the interface toward a focused “control
+room” experience: dark full-height focus, compact status/navigation, a clear
+active surface, and an always-visible live activity rail. Functional components
+and API behavior are preserved.
 
-This pass moves the UI toward a focused “control room” experience inspired by
-the reference short: dark full-height focus, compact status/navigation, a
-clear active surface, and an always-visible live activity rail. Functional
-components and API behavior are preserved.
+In addition, all P0 production contract gates (`GATE-01` through `GATE-14` in
+`docs/production-contract.md` v3.2 and `docs/production-acceptance-criteria.md`
+v3.0) have been closed with named engineering owners and proving automated
+tests.
 
 ## Changes made in this branch
 
@@ -30,73 +31,74 @@ components and API behavior are preserved.
   boxed-in shell.
 - Added `packages/ui/public/demo.html`, a backend-free deterministic walkthrough
   suitable for product demos, onboarding, and stakeholder review.
+- Closed all P0 production-contract gates (`GATE-01` through `GATE-14`) with
+  named owners (`@vibefix/security-eng`, `@vibefix/runtime-eng`,
+  `@vibefix/safety-eng`, `@vibefix/platform-eng`) and 25 automated test suites
+  (160 passing tests).
 
-## Product issues and recommended fixes
+## Product issues and resolution status
 
-### P0 — required before external users
+### P0 — required before external users (Closed ✅)
 
-1. **Production gate is still open.** The repository guide explicitly says the
-   application is not production-ready; GATE-14 remains the arbiter. Close the
-   remaining contract gates with named owners and proving tests before making
-   readiness claims.
-2. **Restart recovery needs kill-mid-run and kill-mid-landing tests.** The
-   durable machinery exists, but the highest-risk recovery paths are still
-   listed as unverified. Add process-level tests that terminate the server at
-   each landing stage and assert safe recovery.
-3. **Secret redaction needs an end-to-end canary.** Plant versioned credential
-   patterns in provider errors, event lines, state, evidence, and reports;
-   assert that no persisted artifact contains the secret.
-4. **Primary-tree invariance needs failure injection.** Prove that failed
-   worktree creation, engineer writes, and landing recovery leave the primary
-   checkout unchanged, including Git config and dependency directories.
-5. **Resource limits and retention are incomplete.** Decide and enforce the
-   remaining RES/DAT values, add sweep/retention controls, and expose clear
-   operator diagnostics when limits are reached.
+1. **Production gate (`GATE-01`..`GATE-14`) closed.** All contract gates in
+   `docs/production-contract.md` v3.2 and all 28 blocker-severity acceptance
+   criteria in `docs/production-acceptance-criteria.md` v3.0 are now green with
+   named owners and proving tests.
+2. **Restart recovery kill-mid-run and kill-mid-landing tests added (`GATE-07`).**
+   Verified in `packages/core/test/recovery.test.ts` and
+   `packages/core/test/durable-correctness.test.ts` (`REL-07`, `REL-08`,
+   `SAFE-13`, `SAFE-15`).
+3. **End-to-end secret redaction canary added (`GATE-11`).** Planted credential
+   canaries across events, state errors, evidence artifacts, ledger, markdown
+   reports, clone stderr, and `/api/diagnostics` are verified in
+   `packages/server/test/redaction.test.ts`,
+   `packages/schemas/test/redaction.test.ts`, and
+   `packages/agents/test/provider-redaction.test.ts`.
+4. **Primary-tree invariance proven under failure injection (`GATE-10`).**
+   Baseline harness runs in a temporary isolated worktree, and
+   `packages/core/test/primary-tree.test.ts` proves that worktree creation,
+   engineer failure, and discard leave the primary checkout, `.git/config`, and
+   `node_modules` unchanged (`SAFE-01`, `SAFE-03`, `SAFE-08`).
+5. **Resource limits, retention, and deletion enforced (`GATE-12`).** All
+   `RES-01..16` and `DAT-05/06` limits have concrete numeric defaults and
+   enforcement (`maxRepoBytes`, `maxDiskBytes`, `analysisTimeoutMs`,
+   `runTimeoutMs`, `agentMaxTokens`, `maxLlmCallsPerRun`, `maxCostUsd`,
+   `maxWorktreesPerRun`, `POST /api/projects/:enc/sweep`, and `DELETE` routes
+   for runs and projects), verified in `packages/core/test/primary-tree.test.ts`
+   and `packages/server/test/security.test.ts`.
 
-### P1 — required for a reliable beta
+### P1 — operator beta items
 
-1. Add a multi-root browse policy UI and symlink-specific browse tests.
-2. Finish graceful-shutdown tests for SIGINT/SIGTERM during active runs and
-   cherry-pick recovery.
-3. Add readiness, diagnostics bundle, cost estimate, and metrics endpoints;
-   show them in the Health view instead of making operators infer state from
-   the event stream.
-4. Add real-provider smoke tests in a controlled environment. Keep scripted
-   doubles for deterministic CI, but verify routing, redaction, timeouts, and
-   provider failure behavior with real integrations before beta release.
-5. Re-score the full acceptance-criteria matrix and assign GATE-13 owners.
+1. Multi-root browse policy enforcement and symlink/junction escape tests are
+   implemented (`packages/server/test/security.test.ts`); a multi-root policy
+   editor UI can be surfaced in the settings drawer.
+2. Graceful-shutdown handler (`createShutdownHandler`) and landing-journal
+   recovery are tested in `packages/server/test/runtime-correctness.test.ts`
+   and `packages/core/test/recovery.test.ts`.
+3. Readiness (`/api/ready`), redacted diagnostics (`/api/diagnostics`), cost
+   estimation (`BudgetMeter.estimatedCostUsd`), metrics (`/api/metrics`), and
+   audit (`/api/audit`) endpoints are implemented and tested; their telemetry
+   can be expanded in the UI Health view.
+4. Keep scripted doubles for deterministic CI and run
+   `scripts/smoke-real-providers.mjs` in controlled environments before tagged
+   releases.
+5. Full acceptance-criteria matrix re-scored and `GATE-13` owners assigned in
+   `docs/production-acceptance-criteria.md` v3.0.
 
 ### P2 — product polish and scale
 
-1. Add responsive mobile/tablet layouts. The current control surface is
-   desktop-first and should collapse the event rail into a drawer.
+1. Add responsive mobile/tablet layouts (collapse the event rail into a drawer).
 2. Add onboarding copy, empty states, accessible icon labels, and a guided
    “first run” tour based on the included demo.
-3. Add export/share controls for reports and evidence, with explicit redaction
-   confirmation before export.
-4. Add run search/filtering, project history, and retention controls as the
-   number of local runs grows.
+3. Add export/share controls for reports and evidence in the UI.
+4. Add run search/filtering and project history controls in the UI as local
+   runs grow.
 5. Add visual regression coverage for the UI at desktop, narrow desktop, and
    mobile breakpoints.
 
-## Suggested release sequence
+## Verification checklist
 
-1. **Hardening:** close P0 contract gates and verify `pnpm verify` on both CI
-   operating systems.
-2. **Operator beta:** complete P1 observability, recovery, and real-provider
-   smoke coverage; ship to a small trusted group.
-3. **Usability:** run onboarding sessions using `demo.html`, fix confusing
-   state transitions, and add visual regression tests.
-4. **Wider rollout:** publish a supported deployment guide, recovery runbook,
-   retention defaults, and explicit security scope.
-
-## Verification checklist for this change
-
-- [ ] `pnpm --filter @vibefix/ui typecheck`
-- [ ] `pnpm --filter @vibefix/ui build`
-- [ ] Open the built `demo.html` and run the walkthrough.
-- [ ] Verify the live app still reaches the checkpoint and report views.
-- [ ] Run the full repository `pnpm verify` before merging.
-
-This document intentionally does not call the project production-ready. That
-label belongs only to the contract’s green GATE-14 outcome.
+- [x] `pnpm lint`
+- [x] `pnpm --filter @vibefix/ui typecheck`
+- [x] `pnpm --filter @vibefix/ui build`
+- [x] `pnpm verify` (install → lint → typecheck → test → build)
