@@ -32,6 +32,19 @@ function saveRecent(repoPath: string): void {
   }
 }
 
+/** True while the viewport matches the query, updating live across resizes. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = () => setMatches(mql.matches);
+    onChange();
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 // ---------------------------------------------------------------- Open screen
 
 function FolderBrowser({ onPick, onClose }: { onPick: (path: string) => void; onClose: () => void }) {
@@ -144,7 +157,7 @@ function QuickModelPick({ repoPath }: { repoPath: string }) {
   return (
     <div>
       <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Models</div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="rounded border border-slate-800 bg-ink-800 px-2.5 py-2">
           <div className="text-[10px] uppercase tracking-wide text-slate-500">Generates code &amp; analysis</div>
           <select
@@ -242,14 +255,14 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
   const recents = loadRecents().filter((r) => r !== (open.variables ?? ""));
 
   return (
-    <div className="relative mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-5 px-6 py-10">
+    <div className="relative mx-auto flex min-h-screen max-w-3xl flex-col justify-center gap-5 px-4 py-10 sm:px-6">
       <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
         <div className="absolute -left-24 top-10 h-72 w-72 rounded-full bg-sky-600/10 blur-3xl" />
         <div className="absolute -right-16 bottom-20 h-64 w-64 rounded-full bg-emerald-500/10 blur-3xl" />
       </div>
       <div>
         <div className="eyebrow mb-3">The safe way to improve a vibe-coded repo</div>
-        <h1 className="font-display text-5xl tracking-tight text-slate-100 sm:text-6xl">
+        <h1 className="font-display text-4xl tracking-tight text-slate-100 sm:text-5xl lg:text-6xl">
           Vibe<span className="text-sky-400">Fix</span><span className="text-slate-600"> / </span><span className="text-slate-400">control room</span>
         </h1>
         <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-400">
@@ -273,23 +286,25 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
         </div>
 
         {tab === "local" ? (
-          <div className="flex gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row">
             <input
               value={repoPath}
               onChange={(e) => setRepoPath(e.target.value)}
               placeholder="D:\\projects\\my-app"
-              className="flex-1 rounded border border-slate-700 bg-ink-950 px-3 py-2 font-mono text-sm text-slate-200 outline-none focus:border-sky-500"
+              className="min-w-0 flex-1 rounded border border-slate-700 bg-ink-950 px-3 py-2 font-mono text-sm text-slate-200 outline-none focus:border-sky-500"
             />
-            <button onClick={() => setBrowsing(true)} className="rounded bg-slate-700 px-3 py-2 text-sm text-white hover:bg-slate-600">
-              Browse…
-            </button>
-            <button
-              onClick={() => open.mutate(repoPath.trim())}
-              disabled={!repoPath.trim() || open.isPending}
-              className="rounded bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600 disabled:opacity-50"
-            >
-              Open
-            </button>
+            <div className="flex gap-2">
+              <button onClick={() => setBrowsing(true)} className="flex-1 rounded bg-slate-700 px-3 py-2 text-sm text-white hover:bg-slate-600 sm:flex-none">
+                Browse…
+              </button>
+              <button
+                onClick={() => open.mutate(repoPath.trim())}
+                disabled={!repoPath.trim() || open.isPending}
+                className="flex-1 rounded bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600 disabled:opacity-50 sm:flex-none"
+              >
+                Open
+              </button>
+            </div>
           </div>
         ) : (
           <div className="space-y-2">
@@ -390,7 +405,7 @@ function OpenProject({ onOpened }: { onOpened: (repoPath: string, runId: string 
                     <button
                       key={r.runId}
                       onClick={() => openPrevious.mutate(r.runId)}
-                      className="flex w-full items-center justify-between rounded border border-slate-800 bg-ink-800 px-3 py-1.5 text-left hover:bg-slate-800"
+                      className="flex w-full flex-wrap items-center justify-between gap-1 rounded border border-slate-800 bg-ink-800 px-3 py-1.5 text-left hover:bg-slate-800"
                     >
                       <code className="text-[11px] text-slate-400">{r.runId}</code>
                       <span className="text-[10px] text-slate-500">
@@ -500,6 +515,51 @@ function PhaseStepper({ phase, status }: { phase: string; status: string }) {
   );
 }
 
+/** Sidebar/drawer body — shared by the desktop rail and the compact drawer. */
+function WorkspaceNav({
+  activeView,
+  actionNeeded,
+  onPick,
+  runId,
+  startedAt,
+}: {
+  activeView: View;
+  actionNeeded: boolean;
+  onPick: (v: View) => void;
+  runId: string;
+  startedAt?: string;
+}) {
+  return (
+    <>
+      <div className="eyebrow mb-3 px-3">Workspace</div>
+      {NAV.map((item) => {
+        const highlight = actionNeeded && item.id === "checkpoint";
+        return (
+          <button
+            key={item.id}
+            onClick={() => onPick(item.id)}
+            data-active={activeView === item.id}
+            className={`nav-item rounded-lg px-3 py-2 text-left text-xs ${
+              activeView === item.id
+                ? "bg-sky-800 text-white"
+                : highlight
+                  ? "bg-violet-900/40 text-violet-200"
+                  : "text-slate-400 hover:bg-slate-800"
+            }`}
+          >
+            {item.label}
+            {highlight && <span className="ml-1 text-[9px]">●</span>}
+          </button>
+        );
+      })}
+      <div className="mt-auto space-y-1 px-2 text-[10px] text-slate-600">
+        <div>run <code>{runId.slice(0, 16)}…</code></div>
+        <div>started {startedAt ? new Date(startedAt).toLocaleTimeString() : "…"}</div>
+      </div>
+    </>
+  );
+}
+
 function RunScreen({
   repoPath,
   runId,
@@ -514,6 +574,11 @@ function RunScreen({
   const { data: config } = useQuery({ queryKey: ["config", repoPath], queryFn: () => api.config(repoPath) });
   const [view, setView] = useState<View>("overview");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  // Below lg (1024px) the workspace goes compact: the sidebar becomes a
+  // left drawer and the event rail becomes a right drawer (P2 responsive).
+  const compact = useMediaQuery("(max-width: 1023px)");
+  const [navOpen, setNavOpen] = useState(false);
+  const [eventsOpen, setEventsOpen] = useState(false);
   const [streamWidth, setStreamWidth] = useState(() => {
     const v = Number(localStorage.getItem("vibefix.streamWidth"));
     return Number.isFinite(v) && v >= 280 && v <= 1100 ? v : 340;
@@ -549,6 +614,19 @@ function RunScreen({
     return () => clearInterval(timer);
   }, [runId, repoPath]);
 
+  // Escape closes whichever compact drawer is open.
+  useEffect(() => {
+    if (!navOpen && !eventsOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setNavOpen(false);
+        setEventsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen, eventsOpen]);
+
   const phase = runState?.phase ?? "init";
   const status = runState?.status ?? "running";
   const tokens = runState?.budget.tokensSpent ?? usage.total;
@@ -568,17 +646,26 @@ function RunScreen({
 
   return (
     <div className="app-shell flex h-screen flex-col">
-      <header className="app-topbar flex items-center justify-between border-b border-slate-800/80 px-5 py-3">
-        <div className="flex items-center gap-3">
-          <span className="font-display text-base font-bold tracking-tight">
+      <header className="app-topbar flex items-center justify-between gap-2 border-b border-slate-800/80 px-3 py-3 sm:px-5">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+          {compact && (
+            <button
+              onClick={() => setNavOpen(true)}
+              aria-label="Open workspace navigation"
+              className="shrink-0 rounded bg-slate-800 px-2 py-1 text-sm text-slate-300 hover:bg-slate-700"
+            >
+              ☰
+            </button>
+          )}
+          <span className="shrink-0 font-display text-base font-bold tracking-tight">
             Vibe<span className="text-sky-400">Fix</span>
           </span>
-          <span className="hidden text-[10px] uppercase tracking-[.2em] text-slate-600 sm:inline">refactor control plane</span>
-          <code className="max-w-[280px] truncate rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-400" title={repoPath}>
+          <span className="hidden text-[10px] uppercase tracking-[.2em] text-slate-600 lg:inline">refactor control plane</span>
+          <code className="hidden max-w-[280px] truncate rounded bg-ink-800 px-2 py-0.5 text-[11px] text-slate-400 xl:inline" title={repoPath}>
             {repoPath}
           </code>
           <span
-            className={`flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
+            className={`flex shrink-0 items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
               status === "awaitingApproval"
                 ? "bg-violet-900/60 text-violet-300"
                 : status === "completed"
@@ -592,16 +679,25 @@ function RunScreen({
             {phase} · {status}
           </span>
           {actionNeeded && activeView !== "checkpoint" && (
-            <button onClick={() => setView("checkpoint")} className="animate-pulse rounded bg-violet-700 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-violet-600">
+            <button onClick={() => setView("checkpoint")} className="animate-pulse truncate rounded bg-violet-700 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-violet-600">
               ● action needed → review &amp; approve
             </button>
           )}
         </div>
-        <div className="flex items-center gap-3 text-[11px] text-slate-500">
-          <span className={overWarn ? "text-yellow-400" : ""}>
+        <div className="flex shrink-0 items-center gap-2 text-[11px] text-slate-500 sm:gap-3">
+          <span className={`hidden sm:inline ${overWarn ? "text-yellow-400" : ""}`}>
             tokens {tokens.toLocaleString()}{tokenCap !== undefined ? ` / ${tokenCap.toLocaleString()}` : ""}
           </span>
-          <span>committed {runState?.budget.changesCommitted ?? 0}</span>
+          <span className="hidden md:inline">committed {runState?.budget.changesCommitted ?? 0}</span>
+          {compact && (
+            <button
+              onClick={() => setEventsOpen(true)}
+              aria-label="Open event stream"
+              className="rounded bg-slate-800 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-700"
+            >
+              ▤ events
+            </button>
+          )}
           <button
             onClick={() => void api.abort(repoPath, runId).then(() => queryClient.invalidateQueries())}
             className="rounded bg-slate-800 px-2 py-1 text-slate-300 hover:bg-slate-700"
@@ -627,39 +723,53 @@ function RunScreen({
 
       <PhaseStepper phase={phase} status={status} />
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Organized step navigation */}
-        <nav className="app-sidebar flex w-52 shrink-0 flex-col border-r border-slate-800/80 p-3">
-          <div className="eyebrow mb-3 px-3">Workspace</div>
-          {NAV.map((item) => {
-            const highlight = actionNeeded && item.id === "checkpoint";
-            return (
-              <button
-                key={item.id}
-                onClick={() => setView(item.id)}
-                data-active={activeView === item.id}
-                className={`nav-item rounded-lg px-3 py-2 text-left text-xs ${
-                  activeView === item.id
-                    ? "bg-sky-800 text-white"
-                    : highlight
-                      ? "bg-violet-900/40 text-violet-200"
-                      : "text-slate-400 hover:bg-slate-800"
-                }`}
-              >
-                {item.label}
-                {highlight && <span className="ml-1 text-[9px]">●</span>}
-              </button>
-            );
-          })}
-          <div className="mt-auto space-y-1 px-2 text-[10px] text-slate-600">
-            <div>run <code>{runId.slice(0, 16)}…</code></div>
-            <div>started {runState ? new Date(runState.createdAt).toLocaleTimeString() : "…"}</div>
-          </div>
-        </nav>
+      <div className="relative flex flex-1 overflow-hidden">
+        {/* Organized step navigation — desktop rail */}
+        {!compact && (
+          <nav className="app-sidebar flex w-52 shrink-0 flex-col border-r border-slate-800/80 p-3">
+            <WorkspaceNav
+              activeView={activeView}
+              actionNeeded={actionNeeded}
+              onPick={setView}
+              runId={runId}
+              startedAt={runState?.createdAt}
+            />
+          </nav>
+        )}
+        {/* Compact: navigation drawer */}
+        {compact && navOpen && (
+          <div className="fixed inset-0 z-30 bg-black/60" onClick={() => setNavOpen(false)} />
+        )}
+        {compact && (
+          <nav
+            className={`app-sidebar absolute inset-y-0 left-0 z-40 flex w-56 flex-col border-r border-slate-800/80 p-3 shadow-2xl transition-transform duration-200 ${
+              navOpen ? "translate-x-0" : "-translate-x-full"
+            }`}
+            aria-hidden={!navOpen}
+          >
+            <button
+              onClick={() => setNavOpen(false)}
+              aria-label="Close navigation"
+              className="absolute right-2 top-2 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700"
+            >
+              ✕
+            </button>
+            <WorkspaceNav
+              activeView={activeView}
+              actionNeeded={actionNeeded}
+              onPick={(v) => {
+                setView(v);
+                setNavOpen(false);
+              }}
+              runId={runId}
+              startedAt={runState?.createdAt}
+            />
+          </nav>
+        )}
 
         <main
           className="relative grid flex-1 gap-3 overflow-hidden p-3"
-          style={{ gridTemplateColumns: `1fr ${streamWidth}px` }}
+          style={compact ? { gridTemplateColumns: "1fr" } : { gridTemplateColumns: `1fr ${streamWidth}px` }}
         >
           <div className="min-h-0 overflow-hidden">
             {activeView === "overview" && (
@@ -723,11 +833,27 @@ function RunScreen({
               <SettingsPanel repoPath={repoPath} agents={agents} onClose={() => setView("overview")} />
             )}
           </div>
-          <div className="event-pane overflow-hidden rounded-2xl border border-slate-700/60">
-            <EventStream width={streamWidth} onWidthChange={setStreamWidth} />
-          </div>
+          {!compact && (
+            <div className="event-pane overflow-hidden rounded-2xl border border-slate-700/60">
+              <EventStream width={streamWidth} onWidthChange={setStreamWidth} />
+            </div>
+          )}
         </main>
       </div>
+
+      {/* Compact: the event rail collapses into an overlay drawer (P2). */}
+      {compact && eventsOpen && (
+        <div className="fixed inset-0 z-40 bg-black/60" onClick={() => setEventsOpen(false)} />
+      )}
+      {compact && (
+        <div
+          className={`event-pane fixed inset-y-0 right-0 z-50 flex w-[min(92vw,420px)] flex-col overflow-hidden border-l border-slate-700/60 shadow-2xl transition-transform duration-200 ${
+            eventsOpen ? "translate-x-0" : "translate-x-full"
+          }`}
+        >
+          <EventStream variant="drawer" onClose={() => setEventsOpen(false)} />
+        </div>
+      )}
     </div>
   );
 }

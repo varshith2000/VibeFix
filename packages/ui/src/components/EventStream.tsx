@@ -44,10 +44,16 @@ const MAX_WIDTH = 1100;
 export function EventStream({
   width,
   onWidthChange,
+  variant = "rail",
+  onClose,
 }: {
-  width: number;
-  onWidthChange: (px: number) => void;
+  width?: number;
+  onWidthChange?: (px: number) => void;
+  /** "rail" = desktop resizable side rail; "drawer" = mobile overlay panel. */
+  variant?: "rail" | "drawer";
+  onClose?: () => void;
 }) {
+  const drawer = variant === "drawer";
   const events = useRunStore((s) => s.events);
   const wsStatus = useRunStore((s) => s.wsStatus);
   const lastEventAt = useRunStore((s) => s.lastEventAt);
@@ -79,13 +85,14 @@ export function EventStream({
 
   // Drag the left edge to resize; clamp so both panes stay usable.
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (width === undefined) return;
     dragRef.current = { startX: e.clientX, startWidth: width };
     setDragging(true);
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag || onWidthChange === undefined) return;
     const next = Math.min(
       Math.max(drag.startWidth - (e.clientX - drag.startX), MIN_WIDTH),
       Math.min(MAX_WIDTH, window.innerWidth - 520),
@@ -97,26 +104,28 @@ export function EventStream({
     setDragging(false);
   };
 
-  const toggleExpanded = () => onWidthChange(width < 560 ? 640 : DEFAULT_WIDTH);
+  const toggleExpanded = () => onWidthChange?.((width ?? DEFAULT_WIDTH) < 560 ? 640 : DEFAULT_WIDTH);
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden bg-transparent"
-      style={{ width }}
+      className="relative flex h-full w-full flex-col overflow-hidden bg-transparent"
+      style={drawer ? undefined : { width }}
     >
-      {/* Resize handle — drag the edge to widen/shrink the stream. */}
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-        className={`absolute inset-y-0 left-0 z-10 flex w-1.5 cursor-col-resize items-center justify-center ${
-          dragging ? "bg-sky-500/70" : "hover:bg-sky-500/40"
-        }`}
-        title="Drag to resize"
-      />
+      {/* Resize handle — drag the edge to widen/shrink the stream (desktop rail only). */}
+      {!drawer && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          className={`absolute inset-y-0 left-0 z-10 flex w-1.5 cursor-col-resize items-center justify-center ${
+            dragging ? "bg-sky-500/70" : "hover:bg-sky-500/40"
+          }`}
+          title="Drag to resize"
+        />
+      )}
 
       <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3.5 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
         <span className="flex items-center gap-2">
@@ -159,13 +168,24 @@ export function EventStream({
               ⚠ replay degraded
             </span>
           )}
-          <button
-            onClick={toggleExpanded}
-            className="rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-slate-200"
-            title={width < 560 ? "Expand the event stream" : "Shrink back to compact size"}
-          >
-            {width < 560 ? "⤢" : "⤡"}
-          </button>
+          {!drawer && (
+            <button
+              onClick={toggleExpanded}
+              className="rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+              title={(width ?? DEFAULT_WIDTH) < 560 ? "Expand the event stream" : "Shrink back to compact size"}
+            >
+              {(width ?? DEFAULT_WIDTH) < 560 ? "⤢" : "⤡"}
+            </button>
+          )}
+          {drawer && onClose && (
+            <button
+              onClick={onClose}
+              className="rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+              title="Close the event stream"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 
