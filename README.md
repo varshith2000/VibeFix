@@ -1,4 +1,4 @@
-# VibeFix
+# VibeFix Platform
 
 **A local-first, multi-agent refactoring control plane for vibe-coded repositories.**
 
